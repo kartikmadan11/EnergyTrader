@@ -2,7 +2,7 @@
 Fetch hourly weather data from Open-Meteo (free, no API key required) and
 map to IEX 96-block (15-minute) resolution.
 
-Primary location: Delhi NCR (28.67°N, 77.22°E) — India's largest load dispatch
+Primary location: Delhi NCR (28.67°N, 77.22°E) - India's largest load dispatch
 center and the dominant driver of IEX DAM price formation. The pipeline supports
 multiple locations; add entries to LOCATIONS and call fetch_multi_location() to
 get a per-block average across grid points.
@@ -24,32 +24,33 @@ import logging
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
 
-import warnings
 import httpx
+
+from common.http import tls_context
 
 logger = logging.getLogger(__name__)
 
 # ── India grid coordinates ────────────────────────────────────────────────────
 # Extend this dict to enable multi-location averaging (see fetch_multi_location).
 LOCATIONS: dict[str, dict] = {
-    "delhi":   {"lat": 28.67, "lon": 77.22},   # Northern grid, ~28% national load
-    "mumbai":  {"lat": 19.08, "lon": 72.88},   # Western grid
-    "chennai": {"lat": 13.08, "lon": 80.27},   # Southern grid, major solar/wind
+    "delhi": {"lat": 28.67, "lon": 77.22},  # Northern grid, ~28% national load
+    "mumbai": {"lat": 19.08, "lon": 72.88},  # Western grid
+    "chennai": {"lat": 13.08, "lon": 80.27},  # Southern grid, major solar/wind
 }
 DEFAULT_LAT = 28.67
 DEFAULT_LON = 77.22
 
-ARCHIVE_URL  = "https://archive-api.open-meteo.com/v1/archive"
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-HOURLY_VARS  = "temperature_2m,wind_speed_10m,shortwave_radiation,cloud_cover"
+HOURLY_VARS = "temperature_2m,wind_speed_10m,shortwave_radiation,cloud_cover"
 
 # ERA5 reanalysis has ~5-day lag; use the forecast API for more recent dates.
 ARCHIVE_DELAY_DAYS = 6
 
 
 # ── Core fetch ────────────────────────────────────────────────────────────────
+
 
 def fetch_weather_hourly(
     start_date: str,
@@ -75,29 +76,29 @@ def fetch_weather_hourly(
         }
     """
     start = date.fromisoformat(start_date)
-    end   = date.fromisoformat(end_date)
+    end = date.fromisoformat(end_date)
     cutoff = date.today() - timedelta(days=ARCHIVE_DELAY_DAYS)
 
-    archive_end    = min(end, cutoff)
+    archive_end = min(end, cutoff)
     forecast_start = max(start, cutoff + timedelta(days=1))
 
     hourly_data: dict[str, dict[int, dict]] = {}
 
     def _fetch(url: str, s: str, e: str) -> None:
         params = {
-            "latitude":        lat,
-            "longitude":       lon,
-            "start_date":      s,
-            "end_date":        e,
-            "hourly":          HOURLY_VARS,
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": s,
+            "end_date": e,
+            "hourly": HOURLY_VARS,
             "wind_speed_unit": "ms",
-            "timezone":        "Asia/Kolkata",
+            "timezone": "Asia/Kolkata",
         }
-        resp = httpx.get(url, params=params, timeout=timeout, verify=False)
+        resp = httpx.get(url, params=params, timeout=timeout, verify=tls_context())
         resp.raise_for_status()
         data = resp.json()
 
-        times = data["hourly"]["time"]         # "2025-10-01T00:00" …
+        times = data["hourly"]["time"]  # "2025-10-01T00:00" …
         temps = data["hourly"]["temperature_2m"]
         winds = data["hourly"]["wind_speed_10m"]
         solar = data["hourly"]["shortwave_radiation"]
@@ -109,10 +110,10 @@ def fetch_weather_hourly(
             if d_str not in hourly_data:
                 hourly_data[d_str] = {}
             hourly_data[d_str][hour] = {
-                "temperature_2m":      temps[i],
-                "wind_speed_ms":       winds[i],
+                "temperature_2m": temps[i],
+                "wind_speed_ms": winds[i],
                 "solar_radiation_wm2": solar[i],
-                "cloud_cover_pct":     cloud[i],
+                "cloud_cover_pct": cloud[i],
             }
 
     if start <= archive_end:
@@ -128,7 +129,7 @@ def blocks_for_date(hourly: dict[str, dict[int, dict]], date_str: str) -> list[d
     """
     Map an hourly weather dict to all 96 IEX blocks for `date_str`.
 
-    Block → hour mapping:  blocks 1–4 → hour 0, blocks 5–8 → hour 1, …
+    Block → hour mapping:  blocks 1-4 → hour 0, blocks 5-8 → hour 1, …
     Returns a list of 96 dicts (block 1-indexed).
     """
     day = hourly.get(date_str, {})
@@ -136,17 +137,20 @@ def blocks_for_date(hourly: dict[str, dict[int, dict]], date_str: str) -> list[d
     for block in range(1, 97):
         hour = (block - 1) // 4
         w = day.get(hour, {})
-        rows.append({
-            "block":               block,
-            "temperature_2m":      w.get("temperature_2m"),
-            "wind_speed_ms":       w.get("wind_speed_ms"),
-            "solar_radiation_wm2": w.get("solar_radiation_wm2"),
-            "cloud_cover_pct":     w.get("cloud_cover_pct"),
-        })
+        rows.append(
+            {
+                "block": block,
+                "temperature_2m": w.get("temperature_2m"),
+                "wind_speed_ms": w.get("wind_speed_ms"),
+                "solar_radiation_wm2": w.get("solar_radiation_wm2"),
+                "cloud_cover_pct": w.get("cloud_cover_pct"),
+            }
+        )
     return rows
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
+
 
 def ensure_weather_columns(db_path: Path) -> None:
     """
@@ -154,9 +158,9 @@ def ensure_weather_columns(db_path: Path) -> None:
     SQLite doesn't support `ADD COLUMN IF NOT EXISTS`; we catch the error.
     """
     additions = [
-        ("wind_speed_ms",       "REAL"),
+        ("wind_speed_ms", "REAL"),
         ("solar_radiation_wm2", "REAL"),
-        ("cloud_cover_pct",     "REAL"),
+        ("cloud_cover_pct", "REAL"),
     ]
     conn = sqlite3.connect(db_path, timeout=120)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -266,12 +270,15 @@ def enrich_price_history(
 
     logger.info(
         "Weather enrichment complete: updated=%d skipped=%d errors=%d",
-        updated, skipped, len(errors),
+        updated,
+        skipped,
+        len(errors),
     )
     return {"updated": updated, "skipped": skipped, "errors": errors}
 
 
 # ── Forecast weather for predict() ───────────────────────────────────────────
+
 
 def fetch_forecast_for_date(
     target_date: str,

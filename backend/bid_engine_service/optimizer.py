@@ -1,8 +1,7 @@
-from typing import Optional
 """
 Bid optimization engine using linear programming (PuLP).
 
-Objective (minimise, since PuLP minimises):
+Objective (minimize, since PuLP minimizes):
   Σ_b [ -price[b]·v[b]
         + λ1·(d_over[b] + d_under[b])·price[b]·penalty_rate          # base DSM penalty
         + λ1·(s_over[b] + s_under[b])·price[b]·penalty_rate·(severe_multiplier-1)  # severe surcharge
@@ -10,19 +9,19 @@ Objective (minimise, since PuLP minimises):
 
 Decision variables:
   v[b]       ≥ 0        volume in MW per block
-  d_over[b]  ≥ 0        MW above (1 + deviation_band)×load[b]   — base penalty zone
-  d_under[b] ≥ 0        MW below (1 - deviation_band)×load[b]   — base penalty zone
-  s_over[b]  ≥ 0        MW above (1 + severe_threshold)×load[b] — severe surcharge zone
-  s_under[b] ≥ 0        MW below (1 - severe_threshold)×load[b] — severe surcharge zone
+  d_over[b]  ≥ 0        MW above (1 + deviation_band)×load[b]   - base penalty zone
+  d_under[b] ≥ 0        MW below (1 - deviation_band)×load[b]   - base penalty zone
+  s_over[b]  ≥ 0        MW above (1 + severe_threshold)×load[b] - severe surcharge zone
+  s_under[b] ≥ 0        MW below (1 - severe_threshold)×load[b] - severe surcharge zone
 
 Hard constraints:
   Σ v[b] ≤ total_demand_mw × volume_scale
   v[b]   ≤ per_block_cap                       (no single-block concentration)
   v[b]   ≥ technical_minimum_mw  (DAM/RTM)     (CERC technical minimum from policy)
-  d_over[b]  ≥ v[b] - (1+deviation_band)·load  (linearise base over-deviation)
-  d_under[b] ≥ (1-deviation_band)·load - v[b]  (linearise base under-deviation)
-  s_over[b]  ≥ v[b] - (1+severe_threshold)·load (linearise severe over-deviation)
-  s_under[b] ≥ (1-severe_threshold)·load - v[b] (linearise severe under-deviation)
+  d_over[b]  ≥ v[b] - (1+deviation_band)·load  (linearize base over-deviation)
+  d_under[b] ≥ (1-deviation_band)·load - v[b]  (linearize base under-deviation)
+  s_over[b]  ≥ v[b] - (1+severe_threshold)·load (linearize severe over-deviation)
+  s_under[b] ≥ (1-severe_threshold)·load - v[b] (linearize severe under-deviation)
 
 All five policy fields feed the LP: deviation_band, penalty_rate,
 severe_deviation_threshold, severe_penalty_multiplier, technical_minimum_mw.
@@ -31,24 +30,26 @@ Price clamping uses price_floor / price_ceiling.
 
 import logging
 
-import numpy as np
 from pulp import (
-    LpProblem,
+    HiGHS,
     LpMinimize,
+    LpProblem,
+    LpStatusOptimal,
     LpVariable,
     lpSum,
-    PULP_CBC_CMD,
+)
+from pulp import (
     value as lp_value,
 )
 
 from common.config import (
-    STRATEGY_PROFILES,
-    NUM_BLOCKS,
     BLOCK_DURATION_MIN,
+    NUM_BLOCKS,
+    STRATEGY_PROFILES,
 )
-from common.dsm_policy import get_active_policy, DSMPolicy
-from common.solver_config import LAMBDA1_BASE, LAMBDA2_BASE
+from common.dsm_policy import DSMPolicy, get_active_policy
 from common.schemas import ConstraintViolation
+from common.solver_config import LAMBDA1_BASE, LAMBDA2_BASE
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def validate_constraints(
     price: float,
     volume_mw: float,
     segment: str,
-    policy: Optional[DSMPolicy] = None,
+    policy: DSMPolicy | None = None,
 ) -> list[ConstraintViolation]:
     """Check a single bid against DSM and market constraints."""
     if policy is None:
@@ -126,29 +127,27 @@ def generate_recommendations(
     strategy: str,
     demand_mw: float,
     segment: str,
-    price_offset_override: Optional[float] = None,
-    risk_tolerance_override: Optional[float] = None,
-    volume_scale_override: Optional[float] = None,
+    price_offset_override: float | None = None,
+    risk_tolerance_override: float | None = None,
+    volume_scale_override: float | None = None,
     per_block_cap_factor: float = _PER_BLOCK_CAP_FACTOR,
-    lambda1_base_override: Optional[float] = None,
-    lambda2_base_override: Optional[float] = None,
+    lambda1_base_override: float | None = None,
+    lambda2_base_override: float | None = None,
 ) -> list[dict]:
     """
-    Generate LP-optimised bid recommendations for all 96 blocks.
+    Generate LP-optimized bid recommendations for all 96 blocks.
 
     Bid price is fixed per block (predicted MCP ± strategy offset × volatility).
-    Volume allocation is the LP decision variable, optimised to maximise cleared
-    value while penalising DSM deviation risk and forecast uncertainty.
+    Volume allocation is the LP decision variable, optimized to maximize cleared
+    value while penalizing DSM deviation risk and forecast uncertainty.
     """
-    # Load the active DSM policy — this is the single source of truth for
+    # Load the active DSM policy - this is the single source of truth for
     # penalty rates, deviation bands, and price limits used in the LP.
     policy = get_active_policy()
 
     profile = STRATEGY_PROFILES[strategy]
     price_offset = (
-        price_offset_override
-        if price_offset_override is not None
-        else profile["price_offset"]
+        price_offset_override if price_offset_override is not None else profile["price_offset"]
     )
     risk_tolerance = (
         risk_tolerance_override
@@ -156,14 +155,11 @@ def generate_recommendations(
         else profile["risk_tolerance"]
     )
     volume_scale = (
-        volume_scale_override
-        if volume_scale_override is not None
-        else profile["volume_scale"]
+        volume_scale_override if volume_scale_override is not None else profile["volume_scale"]
     )
 
-    # λ weights are derived from the policy's base values and the strategy's
-    # risk_tolerance.  Stricter regulations have higher lambda bases, making
-    # the LP penalise deviations more heavily under CERC 2024 vs 2019.
+    # λ weights are the solver base weights scaled by the strategy's risk_tolerance.
+    # The regulation itself enters the objective through penalty_rate and the bands.
     lambda1 = (1.0 - risk_tolerance) * (
         lambda1_base_override if lambda1_base_override is not None else LAMBDA1_BASE
     )
@@ -171,7 +167,7 @@ def generate_recommendations(
         lambda2_base_override if lambda2_base_override is not None else LAMBDA2_BASE
     )
 
-    # Uniform scheduled load per block (MW) — baseline for DSM deviation check
+    # Uniform scheduled load per block (MW) - baseline for DSM deviation check
     load_per_block = demand_mw / NUM_BLOCKS
     per_block_cap = load_per_block * per_block_cap_factor
 
@@ -180,9 +176,14 @@ def generate_recommendations(
     for fc in forecasts:
         b = fc["block"]
         pred = fc["predicted_price"]
-        vol = fc.get("volatility", pred * 0.1)
-        ci_low = fc.get("confidence_low", pred - vol)
-        ci_high = fc.get("confidence_high", pred + vol)
+        # Stored forecast columns are nullable, so treat None like a missing key.
+        vol = fc.get("volatility")
+        if vol is None:
+            vol = pred * 0.1
+        ci_low = fc.get("confidence_low")
+        ci_high = fc.get("confidence_high")
+        if ci_low is None or ci_high is None:
+            ci_low, ci_high = pred - vol, pred + vol
         ci_width = max(ci_high - ci_low, 0.0)
 
         bid_price = pred + price_offset * vol
@@ -199,7 +200,7 @@ def generate_recommendations(
     blocks = sorted(block_data.keys())
 
     # ── Build LP ────────────────────────────────────────────────────────
-    prob = LpProblem("bid_optimisation", LpMinimize)
+    prob = LpProblem("bid_optimization", LpMinimize)
 
     # Decision variables
     v = {b: LpVariable(f"v_{b}", lowBound=0.0, upBound=per_block_cap) for b in blocks}
@@ -209,21 +210,13 @@ def generate_recommendations(
     s_over = {b: LpVariable(f"s_over_{b}", lowBound=0.0) for b in blocks}
     s_under = {b: LpVariable(f"s_under_{b}", lowBound=0.0) for b in blocks}
 
-    severe_surcharge_factor = policy.penalty_rate * (
-        policy.severe_penalty_multiplier - 1.0
-    )
+    severe_surcharge_factor = policy.penalty_rate * (policy.severe_penalty_multiplier - 1.0)
 
-    # Objective: maximise cleared value − base DSM penalty − severe surcharge − uncertainty
+    # Objective: maximize cleared value − base DSM penalty − severe surcharge − uncertainty
     prob += lpSum(
         -block_data[b]["bid_price"] * v[b]
-        + lambda1
-        * (d_over[b] + d_under[b])
-        * block_data[b]["bid_price"]
-        * policy.penalty_rate
-        + lambda1
-        * (s_over[b] + s_under[b])
-        * block_data[b]["bid_price"]
-        * severe_surcharge_factor
+        + lambda1 * (d_over[b] + d_under[b]) * block_data[b]["bid_price"] * policy.penalty_rate
+        + lambda1 * (s_over[b] + s_under[b]) * block_data[b]["bid_price"] * severe_surcharge_factor
         + lambda2 * block_data[b]["ci_width"] * v[b]
         for b in blocks
     )
@@ -234,11 +227,11 @@ def generate_recommendations(
     for b in blocks:
         load = load_per_block
 
-        # Constraint 2: base DSM linearisation — over-deviation
+        # Constraint 2: base DSM linearization - over-deviation
         # d_over[b] ≥ v[b] - (1 + deviation_band) × load
         prob += d_over[b] >= v[b] - (1.0 + policy.deviation_band) * load
 
-        # Constraint 3: base DSM linearisation — under-deviation
+        # Constraint 3: base DSM linearization - under-deviation
         # d_under[b] ≥ (1 - deviation_band) × load - v[b]
         prob += d_under[b] >= (1.0 - policy.deviation_band) * load - v[b]
 
@@ -253,13 +246,12 @@ def generate_recommendations(
             prob += v[b] >= policy.technical_minimum_mw
 
     # ── Solve ───────────────────────────────────────────────────────────
-    solver = PULP_CBC_CMD(msg=0)  # suppress CBC stdout
-    status = prob.solve(solver)
+    status = prob.solve(HiGHS(msg=False))
 
-    # Fall back to uniform allocation if LP fails (infeasible / unbounded)
-    if status != 1:
+    # Fall back to uniform allocation if the LP is infeasible or unbounded
+    if status != LpStatusOptimal:
         logger.warning(
-            "LP solver returned status %s for strategy=%s segment=%s — "
+            "LP solver returned status %s for strategy=%s segment=%s - "
             "falling back to uniform allocation",
             status,
             strategy,
@@ -282,7 +274,7 @@ def generate_recommendations(
         if segment in ("DAM", "RTM") and 0 < vol_mw < policy.technical_minimum_mw:
             vol_mw = policy.technical_minimum_mw
 
-        # DSM penalty estimate — uses the tiered penalty_cost() from the active policy
+        # DSM penalty estimate - uses the tiered penalty_cost() from the active policy
         dsm_penalty_est = policy.penalty_cost(
             volume_mw=vol_mw,
             scheduled_mw=load_per_block,

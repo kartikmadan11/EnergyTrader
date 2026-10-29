@@ -1,16 +1,13 @@
-description: 'CERC Deviation Settlement Mechanism Regulations (2019 framework). Permissible
-  deviation band of ±10% with a penalty rate multiplier of 1.5x. This is the baseline
-  in use before the 2024 draft tightening.
-
-  '
-deviation_band: 0.1
-effective_date: '2019-01-01'
-name: CERC DSM 2019
-penalty_rate: 1.5
-price_ceiling: 12.0
-price_floor: 0.0
 regulation_id: cerc_dsm_2019
+name: CERC DSM 2019
+description: CERC Deviation Settlement Mechanism Regulations, 2019 framework. Permissible deviation band
+  of ±10% of schedule, a 1.5x penalty rate on excess deviation and no severe-deviation surcharge.
+effective_date: '2019-01-01'
+status: superseded
+price_floor: 0.0
+price_ceiling: 12.0
+deviation_band: 0.1
+penalty_rate: 1.5
 severe_deviation_threshold: 0.25
 severe_penalty_multiplier: 1.0
-status: superseded
 technical_minimum_mw: 1.0

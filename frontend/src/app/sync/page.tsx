@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import PageHeader from "@/components/PageHeader";
 import {
   ComposedChart,
   Line,
@@ -11,18 +12,31 @@ import {
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
-  Legend,
 } from "recharts";
 import {
   getLatestForecast,
   getHistory,
   getHealth,
   triggerScrape,
+  errorMessage,
 } from "@/lib/api";
-import { blockToTime } from "@/lib/utils";
+import { blockToTime, marketDate } from "@/lib/utils";
 
 const SEGMENTS = ["DAM", "RTM", "TAM"] as const;
 type Segment = (typeof SEGMENTS)[number];
+
+// The scraper takes at most 30 days per request, so longer ranges sync in windows.
+const SYNC_WINDOW_DAYS = 30;
+
+/** [start, end] windows covering the last `days` days (IST), newest first. */
+function syncWindows(days: number): [string, string][] {
+  const windows: [string, string][] = [];
+  for (let end = 0; end > -days; end -= SYNC_WINDOW_DAYS) {
+    const start = Math.max(end - SYNC_WINDOW_DAYS + 1, 1 - days);
+    windows.push([marketDate(start), marketDate(end)]);
+  }
+  return windows;
+}
 
 const SEGMENT_META: Record<
   Segment,
@@ -53,7 +67,7 @@ interface ChartPoint {
   label: string;
   actual?: number;
   predicted?: number;
-  ci_high?: number;
+  band?: [number, number];
 }
 
 interface SegmentState {
@@ -64,18 +78,34 @@ interface SegmentState {
   loaded: boolean;
 }
 
-const CustomTooltip = ({ active, payload, label }: any) => {
+interface TooltipEntry {
+  name: string;
+  color: string;
+  value?: number | [number, number] | null;
+}
+
+const CustomTooltip = ({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: TooltipEntry[];
+  label?: string;
+}) => {
   if (!active || !payload?.length) return null;
   return (
     <div className="bg-white border border-gray-200 rounded-lg px-3 py-2 text-xs shadow-lg">
       <p className="text-gray-500 mb-1 font-medium border-b border-gray-100 pb-1">{label}</p>
-      {payload.map((p: any) => {
+      {payload.map((p) => {
         if (p.value === undefined || p.value === null) return null;
         return (
           <div key={p.name} className="flex items-center justify-between gap-4 py-0.5">
             <span className="text-gray-500">{p.name}:</span>
-            <span style={{ color: p.color }} className="font-bold">
-              ₹{Number(p.value).toFixed(3)}/kWh
+            <span style={{ color: p.color }} className="font-bold tabular-nums">
+              {Array.isArray(p.value)
+                ? `₹${p.value[0].toFixed(3)} to ₹${p.value[1].toFixed(3)}`
+                : `₹${p.value.toFixed(3)}/kWh`}
             </span>
           </div>
         );
@@ -89,7 +119,7 @@ interface ScrapeInfo {
   row_count: number;
 }
 
-export default function Home() {
+export default function MarketDataSyncPage() {
   const [fetchDays, setFetchDays] = useState<number>(14);
   const [data, setData] = useState<Record<Segment, SegmentState>>({
     DAM: {
@@ -114,7 +144,6 @@ export default function Home() {
       loaded: false,
     },
   });
-  const [health, setHealth] = useState<any>(null);
   const [scraping, setScraping] = useState<Record<Segment, boolean>>({
     DAM: false,
     RTM: false,
@@ -126,6 +155,11 @@ export default function Home() {
   const [scrapeError, setScrapeError] = useState<
     Record<Segment, string | null>
   >({ DAM: null, RTM: null, TAM: null });
+  const [progress, setProgress] = useState<Record<Segment, string | null>>({
+    DAM: null,
+    RTM: null,
+    TAM: null,
+  });
   const [syncingAll, setSyncingAll] = useState(false);
 
   const loadSegment = async (seg: Segment) => {
@@ -137,43 +171,36 @@ export default function Home() {
       ]);
 
       const histRows = histRaw.status === "fulfilled" ? histRaw.value : [];
-      const forecastBlocks =
-        forecastRaw.status === "fulfilled" && forecastRaw.value?.blocks?.length
-          ? forecastRaw.value.blocks
+      const forecast =
+        forecastRaw.status === "fulfilled" && forecastRaw.value.blocks.length
+          ? forecastRaw.value
           : null;
 
-      const dateMap = new Map<string, Map<number, number>>();
+      // One point per (date, block). A forecast for a date that already has
+      // actuals overlays them; a forecast for a future date extends the series.
+      const byKey = new Map<string, ChartPoint>();
+      const pointFor = (date: string, block: number) => {
+        const key = `${date}|${String(block).padStart(2, "0")}`;
+        let p = byKey.get(key);
+        if (!p) {
+          p = { key, label: `${date.slice(5)} ${blockToTime(block)}` };
+          byKey.set(key, p);
+        }
+        return p;
+      };
       for (const row of histRows) {
-        if (!dateMap.has(row.date)) dateMap.set(row.date, new Map());
-        dateMap.get(row.date)!.set(row.block, row.mcp);
+        pointFor(row.date, row.block).actual = row.mcp;
       }
-      const sortedDates = Array.from(dateMap.keys()).sort();
-
-      const points: ChartPoint[] = [];
-      for (const date of sortedDates) {
-        const blockMap = dateMap.get(date)!;
-        for (let b = 1; b <= 96; b++) {
-          const mcp = blockMap.get(b);
-          if (mcp !== undefined) {
-            points.push({
-              key: `${date}|${b}`,
-              label: `${date.slice(5)} ${blockToTime(b)}`,
-              actual: mcp,
-            });
-          }
+      if (forecast) {
+        for (const fb of forecast.blocks) {
+          const p = pointFor(forecast.target_date, fb.block);
+          p.predicted = fb.predicted_price;
+          p.band = [fb.confidence_low, fb.confidence_high];
         }
       }
-
-      if (forecastBlocks) {
-        for (const fb of forecastBlocks) {
-          points.push({
-            key: `pred|${fb.block}`,
-            label: `pred ${blockToTime(fb.block)}`,
-            predicted: fb.predicted_price,
-            ci_high: fb.confidence_high,
-          });
-        }
-      }
+      const points = Array.from(byKey.values()).sort((a, b) =>
+        a.key.localeCompare(b.key),
+      );
 
       const actualVals = points.flatMap((p) =>
         p.actual !== undefined ? [p.actual] : [],
@@ -201,27 +228,45 @@ export default function Home() {
     }
   };
 
+  const loadCoverage = () =>
+    getHealth()
+      .then((h) => {
+        setScrapeInfo({
+          DAM: h.segments.DAM ?? null,
+          RTM: h.segments.RTM ?? null,
+          TAM: h.segments.TAM ?? null,
+        });
+      })
+      .catch(() => {});
+
   const handleScrape = async (seg: Segment) => {
     setScraping((prev) => ({ ...prev, [seg]: true }));
     setScrapeError((prev) => ({ ...prev, [seg]: null }));
-    try {
-      const result = await triggerScrape(seg, fetchDays);
-      setScrapeInfo((prev) => ({
-        ...prev,
-        [seg]: {
-          latest_data: result.dates_with_data.at(-1) ?? null,
-          row_count: result.scraped,
-        },
-      }));
-      await loadSegment(seg);
-    } catch (err: any) {
+    const windows = syncWindows(fetchDays);
+    const failures: string[] = [];
+    for (const [i, [start, end]] of windows.entries()) {
+      if (windows.length > 1) {
+        setProgress((prev) => ({ ...prev, [seg]: `${i + 1}/${windows.length}` }));
+      }
+      try {
+        await triggerScrape(seg, start, end);
+      } catch (err) {
+        const message = errorMessage(err, "Scrape failed.");
+        failures.push(windows.length > 1 ? `${message} (${start} to ${end})` : message);
+      }
+    }
+    const synced = windows.length - failures.length;
+    if (failures.length) {
       setScrapeError((prev) => ({
         ...prev,
-        [seg]: err?.response?.data?.detail ?? "Scrape failed",
+        [seg]: synced
+          ? `${failures.length} of ${windows.length} batches failed: ${failures[0]}`
+          : `Sync failed: ${failures[0]}`,
       }));
-    } finally {
-      setScraping((prev) => ({ ...prev, [seg]: false }));
     }
+    await Promise.all([loadCoverage(), synced ? loadSegment(seg) : null]);
+    setProgress((prev) => ({ ...prev, [seg]: null }));
+    setScraping((prev) => ({ ...prev, [seg]: false }));
   };
 
   const handleSyncAll = async () => {
@@ -233,47 +278,16 @@ export default function Home() {
   };
 
   useEffect(() => {
-    getHealth()
-      .then((h) => {
-        setHealth(h);
-        if (h?.segments) {
-          setScrapeInfo({
-            DAM: h.segments.DAM ?? null,
-            RTM: h.segments.RTM ?? null,
-            TAM: h.segments.TAM ?? null,
-          });
-        }
-      })
-      .catch(() => {});
-
+    loadCoverage();
     SEGMENTS.forEach((seg) => loadSegment(seg));
   }, []);
 
   return (
-    <div className="max-w-[1400px] mx-auto flex flex-col gap-4">
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-            <span className="w-8 h-8 rounded-lg bg-[#006DAE] text-white flex items-center justify-center text-sm">
-              ↻
-            </span>
-            Market Data Sync
-          </h1>
-          <p className="text-xs text-gray-500 mt-0.5 ml-10">
-            Fetch and synchronize MCP data from IEX for all trading segments
-          </p>
-        </div>
-        <span className="text-xs text-gray-400">
-          {new Date().toLocaleDateString("en-IN", {
-            day: "2-digit",
-            month: "short",
-            year: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
-        </span>
-      </div>
+    <div className="flex flex-col gap-4">
+      <PageHeader
+        title="Market Data Sync"
+        description="Fetch and synchronize cleared prices from IEX for every trading segment"
+      />
 
       {/* Sync Controls */}
       <div className="card">
@@ -307,7 +321,13 @@ export default function Home() {
               </select>
             </div>
             <p className="text-xs text-gray-500 pt-5">
-              This will fetch the last <span className="font-medium text-gray-700">{fetchDays} days</span> of data
+              This will fetch the last{" "}
+              <span className="font-medium text-gray-700">
+                {fetchDays} {fetchDays === 1 ? "day" : "days"}
+              </span>{" "}
+              of data
+              {fetchDays > SYNC_WINDOW_DAYS &&
+                `, in ${syncWindows(fetchDays).length} batches of up to ${SYNC_WINDOW_DAYS} days`}
             </p>
           </div>
           <button
@@ -363,7 +383,7 @@ export default function Home() {
                   {isScrapingThis && (
                     <span className="text-[10px] text-gray-500 flex items-center gap-1">
                       <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-pulse"></span>
-                      Syncing…
+                      Syncing…{progress[seg] && ` ${progress[seg]}`}
                     </span>
                   )}
                   {!isScrapingThis && hasData && !isStale && (
@@ -426,7 +446,7 @@ export default function Home() {
             {/* Error */}
             {scrapeError[seg] && (
               <div className="mb-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                Sync failed: {scrapeError[seg]}
+                {scrapeError[seg]}
               </div>
             )}
 
@@ -448,10 +468,6 @@ export default function Home() {
                           <stop offset="5%" stopColor={meta.color} stopOpacity={0.15} />
                           <stop offset="95%" stopColor={meta.color} stopOpacity={0} />
                         </linearGradient>
-                        <linearGradient id={`ciGrad-${seg}`} x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={meta.predColor} stopOpacity={0.1} />
-                          <stop offset="95%" stopColor={meta.predColor} stopOpacity={0} />
-                        </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" vertical={false} />
                       <XAxis
@@ -472,15 +488,10 @@ export default function Home() {
                         width={40}
                       />
                       <Tooltip content={<CustomTooltip />} />
-                      <Legend
-                        iconType="circle"
-                        iconSize={7}
-                        wrapperStyle={{ fontSize: "10px", paddingTop: "6px" }}
-                      />
                       {state.hasPred && (
-                        <Area type="monotone" dataKey="ci_high" stroke="none"
-                          fill={`url(#ciGrad-${seg})`} name="Confidence Band"
-                          legendType="none" connectNulls dot={false} />
+                        <Area type="monotone" dataKey="band" stroke="none"
+                          fill={meta.predColor} fillOpacity={0.12} name="95% interval"
+                          connectNulls dot={false} activeDot={false} />
                       )}
                       <Area type="monotone" dataKey="actual" name="Historical MCP"
                         stroke={meta.color} strokeWidth={1.5}
@@ -489,7 +500,7 @@ export default function Home() {
                         activeDot={{ r: 3, fill: meta.color, strokeWidth: 1.5, stroke: "white" }}
                       />
                       {state.hasPred && (
-                        <Line type="monotone" dataKey="predicted" name="AI Forecast"
+                        <Line type="monotone" dataKey="predicted" name="Forecast"
                           stroke={meta.predColor} strokeWidth={2} dot={false}
                           strokeDasharray="5 3" connectNulls
                           activeDot={{ r: 4, fill: meta.predColor, strokeWidth: 1.5, stroke: "white" }}
@@ -505,8 +516,8 @@ export default function Home() {
                   </span>
                   {state.hasPred && (
                     <span className="flex items-center gap-1">
-                      <span className="w-3 h-px" style={{ backgroundColor: meta.predColor }}></span>
-                      AI Forecast
+                      <span className="w-3 border-t-2 border-dashed" style={{ borderColor: meta.predColor }}></span>
+                      Latest forecast
                     </span>
                   )}
                   <span>· {state.points.length} data points</span>
@@ -516,8 +527,8 @@ export default function Home() {
               <div className="h-40 flex flex-col items-center justify-center gap-2 text-center bg-gray-50 rounded-lg border border-dashed border-gray-200">
                 <p className="text-xs font-medium text-gray-500">No data for {seg}</p>
                 <p className="text-[11px] text-gray-400">
-                  Click "Sync {seg}" to fetch data, then visit{" "}
-                  <Link href="/forecast" className="text-[#006DAE] hover:underline">Forecast</Link> to generate predictions
+                  Click Sync {seg} to fetch prices, then train a model in{" "}
+                  <Link href="/forecast" className="text-[#006DAE] hover:underline">Model Training</Link>.
                 </p>
               </div>
             )}

@@ -1,33 +1,48 @@
-from typing import Optional
+import asyncio
+import io
+import logging
+from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from sklearn.metrics import r2_score
+from sqlalchemy import func as sql_func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func as sql_func
-from datetime import datetime, timedelta
-import pandas as pd
-import numpy as np
-import io
 
 from common.database import get_db
-from common.models import PriceHistory, Forecast
-from common.schemas import ForecastResponse, ForecastBlock, TrainRequest
+from common.forecasts import latest_forecasts
+from common.models import Forecast, PriceHistory
+from common.schemas import ForecastBlock, ForecastResponse, TrainRequest
+from data.scrape_weather import fetch_weather_hourly
+
+from . import metrics
 from .model import PriceForecastModel
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/forecast", tags=["Forecast"])
 
-# Cache loaded models per segment
+# Trained models are loaded from disk once per segment.
 _models: dict[str, PriceForecastModel] = {}
 
-# History cache: segment -> (DataFrame, expiry datetime)
-_history_cache: dict[str, tuple[pd.DataFrame, datetime]] = {}
-_HISTORY_TTL = timedelta(minutes=15)
+# Days of history the model sees for lag and rolling features.
+_CONTEXT_DAYS = 30
+# Backtest days with less prior history than this are skipped.
+_MIN_CONTEXT_DAYS = 7
 
-
-def _invalidate_history_cache(segment: Optional[str] = None) -> None:
-    if segment:
-        _history_cache.pop(segment, None)
-    else:
-        _history_cache.clear()
+_HISTORY_COLUMNS = (
+    PriceHistory.date,
+    PriceHistory.block,
+    PriceHistory.segment,
+    PriceHistory.mcp,
+    PriceHistory.mcv,
+    PriceHistory.demand_mw,
+    PriceHistory.supply_mw,
+    PriceHistory.renewable_gen_mw,
+    PriceHistory.temperature,
+)
 
 
 def _get_model(segment: str) -> PriceForecastModel:
@@ -38,69 +53,70 @@ def _get_model(segment: str) -> PriceForecastModel:
     return _models[segment]
 
 
+def _require_model(segment: str) -> PriceForecastModel:
+    model = _get_model(segment)
+    if model.model is None:
+        raise HTTPException(503, f"No trained model for {segment}. POST /forecast/train first.")
+    return model
+
+
 def _validate_date(d: str) -> str:
     try:
         datetime.strptime(d, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(422, f"Invalid date: {d}")
+    except ValueError as exc:
+        raise HTTPException(422, f"Invalid date: {d}") from exc
     return d
 
 
-@router.get("/predict", response_model=ForecastResponse)
-async def predict_prices(
-    target_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
-    block_start: int = Query(default=1, ge=1, le=96),
-    block_end: int = Query(default=96, ge=1, le=96),
-    db: AsyncSession = Depends(get_db),
-):
-    """Generate price forecasts for a target date and segment, optionally filtered to a block range."""
-    target_date = _validate_date(target_date)
+def _validate_block_range(block_start: int, block_end: int) -> None:
     if block_start > block_end:
         raise HTTPException(422, "block_start must be <= block_end")
-    model = _get_model(segment)
-    if model.model is None:
-        raise HTTPException(
-            503, f"No trained model for {segment}. POST /forecast/train first."
-        )
 
-    # Fetch recent history for feature engineering (cached for 15 min)
-    cached = _history_cache.get(segment)
-    if cached and datetime.utcnow() < cached[1]:
-        history_df = cached[0]
-    else:
-        result = await db.execute(
-            select(PriceHistory)
-            .where(PriceHistory.segment == segment)
-            .order_by(PriceHistory.date.desc(), PriceHistory.block)
-            .limit(96 * 30)  # last ~30 days
-        )
-        rows = result.scalars().all()
-        if not rows:
-            raise HTTPException(400, "No historical data available. Load data first.")
-        history_df = pd.DataFrame(
-            [
-                {
-                    "date": r.date,
-                    "block": r.block,
-                    "segment": r.segment,
-                    "mcp": r.mcp,
-                    "mcv": r.mcv,
-                    "demand_mw": r.demand_mw,
-                    "supply_mw": r.supply_mw,
-                    "renewable_gen_mw": r.renewable_gen_mw,
-                    "temperature": r.temperature,
-                }
-                for r in rows
-            ]
-        )
-        _history_cache[segment] = (history_df, datetime.utcnow() + _HISTORY_TTL)
 
-    blocks = model.predict(target_date, history_df)
-    if block_start > 1 or block_end < 96:
-        blocks = [b for b in blocks if block_start <= b["block"] <= block_end]
+def _in_block_range(blocks: list[dict], block_start: int, block_end: int) -> list[dict]:
+    return [b for b in blocks if block_start <= b["block"] <= block_end]
 
-    # Persist forecasts
+
+async def _history(
+    db: AsyncSession, segment: str, before: str | None = None, days: int | None = None
+) -> pd.DataFrame:
+    """
+    Price history for a segment, oldest first.
+
+    *before* excludes that date and everything after it, so a forecast for a past date
+    never sees its own actuals.
+    *days* keeps only the most recent N days.
+    """
+    q = select(*_HISTORY_COLUMNS).where(PriceHistory.segment == segment)
+    if before is not None:
+        q = q.where(PriceHistory.date < before)
+    q = q.order_by(PriceHistory.date.desc(), PriceHistory.block)
+    if days is not None:
+        q = q.limit(96 * days)
+    rows = (await db.execute(q)).all()
+    df = pd.DataFrame(rows, columns=[c.key for c in _HISTORY_COLUMNS])
+    return df.sort_values(["date", "block"], kind="stable").reset_index(drop=True)
+
+
+async def _range_weather(
+    model: PriceForecastModel, date_from: str, date_to: str
+) -> dict[str, dict[int, dict]]:
+    """
+    Hourly weather for every date in a range, in one request instead of one per date.
+
+    Empty when the model takes no weather features or the fetch fails.
+    The model then falls back to its defaults, as it does for a single-date forecast.
+    """
+    if not model.uses_weather:
+        return {}
+    try:
+        return await asyncio.to_thread(fetch_weather_hourly, date_from, date_to)
+    except Exception as exc:
+        logger.warning("Weather fetch failed for %s to %s: %s", date_from, date_to, exc)
+        return {}
+
+
+def _store(db: AsyncSession, target_date: str, segment: str, blocks: list[dict]) -> None:
     for b in blocks:
         db.add(
             Forecast(
@@ -114,6 +130,32 @@ async def predict_prices(
                 top_features=b["top_features"],
             )
         )
+
+
+@router.get("/predict", response_model=ForecastResponse)
+async def predict_prices(
+    target_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
+    block_start: int = Query(default=1, ge=1, le=96),
+    block_end: int = Query(default=96, ge=1, le=96),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Forecast all 96 blocks of a delivery date, optionally filtered to a block range.
+
+    Features are built only from history before target_date.
+    """
+    target_date = _validate_date(target_date)
+    _validate_block_range(block_start, block_end)
+    model = _require_model(segment)
+
+    history_df = await _history(db, segment, before=target_date, days=_CONTEXT_DAYS)
+    if history_df.empty:
+        raise HTTPException(400, f"No price history before {target_date}. Load data first.")
+
+    blocks = await asyncio.to_thread(model.predict, target_date, history_df)
+    blocks = _in_block_range(blocks, block_start, block_end)
+    _store(db, target_date, segment, blocks)
     await db.commit()
 
     return ForecastResponse(
@@ -132,11 +174,14 @@ async def predict_prices_range(
     block_end: int = Query(default=96, ge=1, le=96),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate forecasts for a date range (max 30 days), optionally filtered to a block range."""
+    """
+    Forecast each day in a range of up to 30 days, optionally filtered to a block range.
+
+    Each day is forecast only from history before that day.
+    """
     date_from = _validate_date(date_from)
     date_to = _validate_date(date_to)
-    if block_start > block_end:
-        raise HTTPException(422, "block_start must be <= block_end")
+    _validate_block_range(block_start, block_end)
     d0 = datetime.strptime(date_from, "%Y-%m-%d")
     d1 = datetime.strptime(date_to, "%Y-%m-%d")
     if d0 > d1:
@@ -144,68 +189,31 @@ async def predict_prices_range(
     if (d1 - d0).days > 29:
         raise HTTPException(422, "Date range cannot exceed 30 days")
 
-    model = _get_model(segment)
-    if model.model is None:
-        raise HTTPException(
-            503, f"No trained model for {segment}. POST /forecast/train first."
-        )
+    model = _require_model(segment)
 
-    # Reuse history cache (same as single-day endpoint)
-    cached = _history_cache.get(segment)
-    if cached and datetime.utcnow() < cached[1]:
-        history_df = cached[0]
-    else:
-        result = await db.execute(
-            select(PriceHistory)
-            .where(PriceHistory.segment == segment)
-            .order_by(PriceHistory.date.desc(), PriceHistory.block)
-            .limit(96 * 30)
-        )
-        rows = result.scalars().all()
-        if not rows:
-            raise HTTPException(400, "No historical data available. Load data first.")
-        history_df = pd.DataFrame(
-            [
-                {
-                    "date": r.date,
-                    "block": r.block,
-                    "segment": r.segment,
-                    "mcp": r.mcp,
-                    "mcv": r.mcv,
-                    "demand_mw": r.demand_mw,
-                    "supply_mw": r.supply_mw,
-                    "renewable_gen_mw": r.renewable_gen_mw,
-                    "temperature": r.temperature,
-                }
-                for r in rows
-            ]
-        )
-        _history_cache[segment] = (history_df, datetime.utcnow() + _HISTORY_TTL)
+    # One query covers the context before date_from and every day inside the range.
+    full_df = await _history(db, segment, before=date_to, days=_CONTEXT_DAYS + (d1 - d0).days)
+    if full_df.empty:
+        raise HTTPException(400, f"No price history before {date_to}. Load data first.")
 
-    days = []
-    current = d0
-    while current <= d1:
-        date_str = current.strftime("%Y-%m-%d")
-        day_blocks = model.predict(date_str, history_df)
-        if block_start > 1 or block_end < 96:
-            day_blocks = [
-                b for b in day_blocks if block_start <= b["block"] <= block_end
-            ]
-        for b in day_blocks:
-            db.add(
-                Forecast(
-                    target_date=date_str,
-                    block=b["block"],
-                    segment=segment,
-                    predicted_price=b["predicted_price"],
-                    confidence_low=b["confidence_low"],
-                    confidence_high=b["confidence_high"],
-                    volatility=b["volatility"],
-                    top_features=b["top_features"],
-                )
+    weather = await _range_weather(model, date_from, date_to)
+
+    def forecast_days() -> list[dict]:
+        days = []
+        current = d0
+        while current <= d1:
+            date_str = current.strftime("%Y-%m-%d")
+            context = full_df[full_df["date"] < date_str].tail(96 * _CONTEXT_DAYS)
+            blocks = model.predict(date_str, context, weather.get(date_str, {}))
+            days.append(
+                {"date": date_str, "blocks": _in_block_range(blocks, block_start, block_end)}
             )
-        days.append({"date": date_str, "blocks": day_blocks})
-        current += timedelta(days=1)
+            current += timedelta(days=1)
+        return days
+
+    days = await asyncio.to_thread(forecast_days)
+    for day in days:
+        _store(db, day["date"], segment, day["blocks"])
     await db.commit()
 
     return {
@@ -216,35 +224,41 @@ async def predict_prices_range(
     }
 
 
+async def _latest_run(db: AsyncSession, segment: str) -> tuple[str, list[Forecast]]:
+    """The delivery date of the newest stored forecast and its latest row per block."""
+    target_date = (
+        await db.execute(
+            select(Forecast.target_date)
+            .where(Forecast.segment == segment)
+            .order_by(Forecast.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if target_date is None:
+        raise HTTPException(404, f"No stored forecast for {segment}.")
+    return target_date, list((await latest_forecasts(db, target_date, segment)).values())
+
+
 @router.get("/latest", response_model=ForecastResponse)
 async def get_latest_forecast(
     segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return the most recent stored forecast for a segment (stale-data fallback)."""
-    result = await db.execute(
-        select(Forecast)
-        .where(Forecast.segment == segment)
-        .order_by(Forecast.created_at.desc())
-        .limit(96)
-    )
-    rows = result.scalars().all()
-    if not rows:
-        raise HTTPException(404, f"No cached forecast for {segment}.")
-
-    target_date = rows[0].target_date
+    """The most recently generated forecast for a segment."""
+    target_date, rows = await _latest_run(db, segment)
     blocks = [
         ForecastBlock(
             block=r.block,
             predicted_price=r.predicted_price,
-            confidence_low=r.confidence_low or r.predicted_price * 0.9,
-            confidence_high=r.confidence_high or r.predicted_price * 1.1,
+            confidence_low=r.confidence_low if r.confidence_low is not None else r.predicted_price,
+            confidence_high=r.confidence_high
+            if r.confidence_high is not None
+            else r.predicted_price,
             volatility=r.volatility or 0.0,
             top_features=r.top_features or [],
         )
-        for r in sorted(rows, key=lambda x: x.block)
+        for r in rows
     ]
-
     return ForecastResponse(target_date=target_date, segment=segment, blocks=blocks)
 
 
@@ -253,17 +267,8 @@ async def export_forecast_csv(
     segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Export the latest forecast as CSV for manual exchange upload."""
-    result = await db.execute(
-        select(Forecast)
-        .where(Forecast.segment == segment)
-        .order_by(Forecast.created_at.desc())
-        .limit(96)
-    )
-    rows = result.scalars().all()
-    if not rows:
-        raise HTTPException(404, f"No forecast data for {segment}.")
-
+    """The most recently generated forecast for a segment as CSV."""
+    target_date, rows = await _latest_run(db, segment)
     df = pd.DataFrame(
         [
             {
@@ -275,18 +280,16 @@ async def export_forecast_csv(
                 "confidence_high": r.confidence_high,
                 "volatility": r.volatility,
             }
-            for r in sorted(rows, key=lambda x: x.block)
+            for r in rows
         ]
     )
     buf = io.StringIO()
     df.to_csv(buf, index=False)
-    buf.seek(0)
-
-    filename = f"forecast_{segment}_{rows[0].target_date}.csv"
+    filename = f"forecast_{segment}_{target_date}.csv"
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -296,34 +299,31 @@ async def get_price_history(
     days: int = Query(default=7, ge=1, le=60),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return the last `days` days of scraped MCP data for a segment."""
+    """The last `days` days of cleared prices for a segment, newest first."""
     result = await db.execute(
         select(PriceHistory.date, PriceHistory.block, PriceHistory.mcp)
         .where(PriceHistory.segment == segment)
         .order_by(PriceHistory.date.desc(), PriceHistory.block)
         .limit(days * 96)
     )
-    rows = result.all()
-    return [{"date": r.date, "block": r.block, "mcp": r.mcp} for r in rows]
+    return [{"date": r.date, "block": r.block, "mcp": r.mcp} for r in result.all()]
 
 
 @router.get("/model-info")
 async def get_model_info(
     segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
 ):
-    """Return metadata about the currently loaded model: train/test date splits."""
-    model = _get_model(segment)
-    if model.model is None:
-        raise HTTPException(503, f"No trained model for {segment}.")
+    """Metadata about the loaded model: its train and test dates."""
+    model = _require_model(segment)
     train_dates = getattr(model, "train_dates", [])
-    test_dates  = getattr(model, "test_dates",  [])
+    test_dates = getattr(model, "test_dates", [])
     return {
         "segment": segment,
         "train_dates": train_dates,
-        "test_dates":  test_dates,
+        "test_dates": test_dates,
         "train_count": len(train_dates),
-        "test_count":  len(test_dates),
-        "trained_on":  f"{train_dates[0]} – {train_dates[-1]}" if train_dates else None,
+        "test_count": len(test_dates),
+        "trained_on": f"{train_dates[0]} to {train_dates[-1]}" if train_dates else None,
     }
 
 
@@ -332,15 +332,101 @@ async def get_data_coverage(
     segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return all distinct dates available in price_history for a segment."""
+    """Every distinct date with price history for a segment."""
     result = await db.execute(
         select(PriceHistory.date)
         .where(PriceHistory.segment == segment)
         .distinct()
         .order_by(PriceHistory.date)
     )
-    dates = [r.date for r in result.all()]
-    return {"segment": segment, "dates": dates}
+    return {"segment": segment, "dates": [r.date for r in result.all()]}
+
+
+def _backtest(
+    model: PriceForecastModel,
+    full_df: pd.DataFrame,
+    d0: datetime,
+    d1: datetime,
+    weather: dict[str, dict[int, dict]],
+) -> tuple[list[dict], list[float], list[float]]:
+    """
+    Forecast each day in [d0, d1] from the history before it and score it against its actuals.
+
+    Blocking, so callers run it in a thread.
+    Returns the per-day results and every scored actual and prediction, in order.
+    """
+    model_train_dates = set(getattr(model, "train_dates", []))
+    model_test_dates = set(getattr(model, "test_dates", []))
+
+    all_predicted: list[float] = []
+    all_actual: list[float] = []
+    daily_results = []
+
+    current = d0
+    while current <= d1:
+        date_str = current.strftime("%Y-%m-%d")
+        current += timedelta(days=1)
+
+        actuals_day = full_df[full_df["date"] == date_str]
+        if actuals_day.empty:
+            continue
+        actuals_map = dict(
+            zip(actuals_day["block"].astype(int), actuals_day["mcp"].astype(float), strict=True)
+        )
+
+        context = full_df[full_df["date"] < date_str]
+        if len(context) < 96 * _MIN_CONTEXT_DAYS:
+            continue
+        predicted_blocks = model.predict(
+            date_str, context.tail(96 * _CONTEXT_DAYS), weather.get(date_str, {})
+        )
+
+        blocks_out = []
+        day_predicted, day_actual = [], []
+        for pb in predicted_blocks:
+            actual = actuals_map.get(pb["block"])
+            if actual is None:
+                continue
+            pred = pb["predicted_price"]
+            err_pct = metrics.percentage_error(actual, pred)
+            blocks_out.append(
+                {
+                    "block": pb["block"],
+                    "predicted": round(pred, 4),
+                    "actual": round(actual, 4),
+                    "error_pct": round(err_pct, 2) if err_pct is not None else None,
+                }
+            )
+            day_predicted.append(pred)
+            day_actual.append(actual)
+
+        if not day_predicted:
+            continue
+        all_predicted.extend(day_predicted)
+        all_actual.extend(day_actual)
+
+        day_mape = metrics.mape(day_actual, day_predicted)
+        daily_results.append(
+            {
+                "date": date_str,
+                "data_split": (
+                    "train"
+                    if date_str in model_train_dates
+                    else "test"
+                    if date_str in model_test_dates
+                    else "unseen"
+                ),
+                "mape": round(day_mape, 2) if day_mape is not None else None,
+                "smape": round(metrics.smape(day_actual, day_predicted), 2),
+                "mae": round(metrics.mae(day_actual, day_predicted), 4),
+                "rmse": round(metrics.rmse(day_actual, day_predicted), 4),
+                "avg_predicted": round(float(np.mean(day_predicted)), 4),
+                "avg_actual": round(float(np.mean(day_actual)), 4),
+                "blocks": blocks_out,
+            }
+        )
+
+    return daily_results, all_actual, all_predicted
 
 
 @router.get("/evaluate")
@@ -351,13 +437,13 @@ async def evaluate_forecast(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Backtest the trained model against real actuals.
-    For each date in [start_date, end_date], predicts 96 blocks using only data
-    prior to that date (no leakage), then compares with actuals in price_history.
-    Returns per-day and aggregate MAPE/MAE/RMSE/R².
-    """
-    from sklearn.metrics import r2_score as _r2_score
+    Backtest the trained model against actual prices.
 
+    Each date in [start_date, end_date] is forecast from history before that date only,
+    then compared with its actuals.
+    Returns per-day and aggregate MAPE, sMAPE, MAE, RMSE and R².
+    MAPE excludes blocks priced below metrics.MAPE_PRICE_FLOOR and is null when none remain.
+    """
     start_date = _validate_date(start_date)
     end_date = _validate_date(end_date)
     d0 = datetime.strptime(start_date, "%Y-%m-%d")
@@ -367,163 +453,27 @@ async def evaluate_forecast(
     if (d1 - d0).days > 29:
         raise HTTPException(422, "Evaluation range cannot exceed 30 days")
 
-    model = _get_model(segment)
-    if model.model is None:
-        raise HTTPException(
-            503, f"No trained model for {segment}. POST /forecast/train first."
-        )
+    model = _require_model(segment)
 
-    # Fetch full segment history (we need context before the window + actuals inside it)
-    result = await db.execute(
-        select(PriceHistory)
-        .where(PriceHistory.segment == segment)
-        .order_by(PriceHistory.date, PriceHistory.block)
-    )
-    rows = result.scalars().all()
-    if not rows:
+    full_df = await _history(db, segment)
+    if full_df.empty:
         raise HTTPException(400, "No historical data available.")
 
-    full_df = pd.DataFrame(
-        [
-            {
-                "date": r.date,
-                "block": r.block,
-                "segment": r.segment,
-                "mcp": r.mcp,
-                "mcv": r.mcv,
-                "demand_mw": r.demand_mw,
-                "supply_mw": r.supply_mw,
-                "renewable_gen_mw": r.renewable_gen_mw,
-                "temperature": r.temperature,
-            }
-            for r in rows
-        ]
+    weather = await _range_weather(model, start_date, end_date)
+    daily_results, all_actual, all_predicted = await asyncio.to_thread(
+        _backtest, model, full_df, d0, d1, weather
     )
 
-    all_predicted, all_actual = [], []
-    daily_results = []
+    if not daily_results:
+        raise HTTPException(404, "No dates with actuals and enough prior history in the range.")
 
-    # Look up which dates were in the model's train/test split
-    model_train_dates = set(getattr(model, "train_dates", []))
-    model_test_dates  = set(getattr(model, "test_dates",  []))
+    # Rank days by MAPE, falling back to sMAPE for days priced entirely below the floor.
+    def day_error(d: dict) -> float:
+        return d["mape"] if d["mape"] is not None else d["smape"]
 
-    current = d0
-    while current <= d1:
-        date_str = current.strftime("%Y-%m-%d")
-
-        # Actuals for this day
-        actuals_day = full_df[full_df["date"] == date_str].copy()
-        if actuals_day.empty:
-            current += timedelta(days=1)
-            continue
-
-        actuals_map = {
-            int(r["block"]): float(r["mcp"]) for _, r in actuals_day.iterrows()
-        }
-
-        # History strictly before this date (last 30 days for feature engineering)
-        cutoff = current
-        history_before = full_df[pd.to_datetime(full_df["date"]) < cutoff].copy()
-        if len(history_before) < 96 * 7:
-            current += timedelta(days=1)
-            continue
-
-        # Keep last 30 days of pre-date history
-        history_before = history_before.sort_values(["date", "block"]).tail(96 * 30)
-
-        try:
-            predicted_blocks = model.predict(date_str, history_before)
-        except Exception:
-            current += timedelta(days=1)
-            continue
-
-        blocks_out = []
-        day_predicted, day_actual = [], []
-        for pb in predicted_blocks:
-            blk = pb["block"]
-            pred = pb["predicted_price"]
-            actual = actuals_map.get(blk)
-            if actual is None:
-                continue
-            err_pct = abs(pred - actual) / max(abs(actual), 1e-6) * 100
-            blocks_out.append(
-                {
-                    "block": blk,
-                    "predicted": round(pred, 4),
-                    "actual": round(actual, 4),
-                    "error_pct": round(err_pct, 2),
-                }
-            )
-            day_predicted.append(pred)
-            day_actual.append(actual)
-            all_predicted.append(pred)
-            all_actual.append(actual)
-
-        if not day_predicted:
-            current += timedelta(days=1)
-            continue
-
-        dp = np.array(day_predicted)
-        da = np.array(day_actual)
-        day_mape = float(np.mean(np.abs(dp - da) / np.maximum(np.abs(da), 1e-6)) * 100)
-        day_mae = float(np.mean(np.abs(dp - da)))
-        day_rmse = float(np.sqrt(np.mean((dp - da) ** 2)))
-        # Filtered MAPE: exclude blocks where actual < ₹1 (avoids solar-collapse noise inflating metric)
-        fmask = da >= 1.0
-        day_filtered_mape = (
-            float(
-                np.mean(
-                    np.abs(dp[fmask] - da[fmask]) / np.maximum(np.abs(da[fmask]), 1e-6)
-                )
-                * 100
-            )
-            if fmask.sum() > 0
-            else day_mape
-        )
-
-        daily_results.append(
-            {
-                "date": date_str,
-                "data_split": (
-                    "train" if date_str in model_train_dates
-                    else "test" if date_str in model_test_dates
-                    else "unseen"
-                ),
-                "mape": round(day_mape, 2),
-                "filtered_mape": round(day_filtered_mape, 2),
-                "mae": round(day_mae, 4),
-                "rmse": round(day_rmse, 4),
-                "avg_predicted": round(float(np.mean(dp)), 4),
-                "avg_actual": round(float(np.mean(da)), 4),
-                "blocks": blocks_out,
-            }
-        )
-        current += timedelta(days=1)
-
-    if not all_predicted:
-        raise HTTPException(404, "No dates with actuals found in the given range.")
-
-    ap = np.array(all_predicted)
-    aa = np.array(all_actual)
-    agg_mape = float(np.mean(np.abs(ap - aa) / np.maximum(np.abs(aa), 1e-6)) * 100)
-    agg_mae = float(np.mean(np.abs(ap - aa)))
-    agg_rmse = float(np.sqrt(np.mean((ap - aa) ** 2)))
-    agg_r2 = float(_r2_score(aa, ap))
-    agg_fmask = aa >= 1.0
-    agg_filtered_mape = (
-        float(
-            np.mean(
-                np.abs(ap[agg_fmask] - aa[agg_fmask])
-                / np.maximum(np.abs(aa[agg_fmask]), 1e-6)
-            )
-            * 100
-        )
-        if agg_fmask.sum() > 0
-        else agg_mape
-    )
-
-    best_day = min(daily_results, key=lambda d: d["mape"])
-    worst_day = max(daily_results, key=lambda d: d["mape"])
+    best_day = min(daily_results, key=day_error)
+    worst_day = max(daily_results, key=day_error)
+    agg_mape = metrics.mape(all_actual, all_predicted)
 
     return {
         "segment": segment,
@@ -531,114 +481,82 @@ async def evaluate_forecast(
         "end_date": end_date,
         "days_evaluated": len(daily_results),
         "aggregate": {
-            "mape": round(agg_mape, 2),
-            "filtered_mape": round(agg_filtered_mape, 2),
-            "mae": round(agg_mae, 4),
-            "rmse": round(agg_rmse, 4),
-            "r2": round(agg_r2, 4),
+            "mape": round(agg_mape, 2) if agg_mape is not None else None,
+            "smape": round(metrics.smape(all_actual, all_predicted), 2),
+            "mae": round(metrics.mae(all_actual, all_predicted), 4),
+            "rmse": round(metrics.rmse(all_actual, all_predicted), 4),
+            "r2": round(float(r2_score(all_actual, all_predicted)), 4),
         },
-        "best_day": {"date": best_day["date"], "mape": best_day["mape"]},
-        "worst_day": {"date": worst_day["date"], "mape": worst_day["mape"]},
+        "best_day": {k: best_day[k] for k in ("date", "mape", "smape")},
+        "worst_day": {k: worst_day[k] for k in ("date", "mape", "smape")},
         "daily": daily_results,
     }
 
 
 @router.get("/health")
 async def forecast_health(db: AsyncSession = Depends(get_db)):
-    """Health check: DB connectivity + latest data timestamps per segment."""
+    """Row counts, latest price date and latest forecast time per segment."""
     status = {"status": "ok", "segments": {}}
-    for seg in ["DAM", "RTM", "TAM"]:
-        result = await db.execute(
-            select(
-                sql_func.max(PriceHistory.date).label("latest_data"),
-                sql_func.count(PriceHistory.id).label("row_count"),
-            ).where(PriceHistory.segment == seg)
-        )
-        row = result.one()
-        # Latest forecast
-        fc = await db.execute(
-            select(sql_func.max(Forecast.created_at).label("latest_forecast")).where(
-                Forecast.segment == seg
+    for seg in ("DAM", "RTM", "TAM"):
+        row = (
+            await db.execute(
+                select(
+                    sql_func.max(PriceHistory.date).label("latest_data"),
+                    sql_func.count(PriceHistory.id).label("row_count"),
+                ).where(PriceHistory.segment == seg)
             )
-        )
-        fc_row = fc.one()
+        ).one()
+        latest_forecast = (
+            await db.execute(
+                select(sql_func.max(Forecast.created_at)).where(Forecast.segment == seg)
+            )
+        ).scalar_one_or_none()
         status["segments"][seg] = {
             "latest_data": row.latest_data,
             "row_count": row.row_count,
-            "latest_forecast": (
-                str(fc_row.latest_forecast) if fc_row.latest_forecast else None
-            ),
+            "latest_forecast": str(latest_forecast) if latest_forecast else None,
         }
     return status
 
 
 @router.post("/train")
-async def train_model(req: TrainRequest = None, db: AsyncSession = Depends(get_db)):
+async def train_model(req: TrainRequest | None = None, db: AsyncSession = Depends(get_db)):
     """
-    Train the forecasting model on available historical data.
+    Train the forecasting model on all price history for a segment.
 
     Send an empty POST for defaults, or a JSON body to customise:
-    - **hyperparams**: direct model params (max_iter, learning_rate, …)
+    - **hyperparams**: direct model params (max_iter, learning_rate, ...)
     - **tuning**: enable CV search (method, n_iter, cv_folds, param_grid)
     - **features**: extra lags, rolling windows, demand/supply ratio, EMA, momentum
     """
-    if req is None:
-        req = TrainRequest()
-
+    req = req or TrainRequest()
     segment = req.segment
 
-    result = await db.execute(
-        select(PriceHistory)
-        .where(PriceHistory.segment == segment)
-        .order_by(PriceHistory.date, PriceHistory.block)
-    )
-    rows = result.scalars().all()
-    if not rows:
+    df = await _history(db, segment)
+    if df.empty:
         raise HTTPException(400, "No historical data. Load data first.")
 
-    df = pd.DataFrame(
-        [
-            {
-                "date": r.date,
-                "block": r.block,
-                "segment": r.segment,
-                "mcp": r.mcp,
-                "mcv": r.mcv,
-                "demand_mw": r.demand_mw,
-                "supply_mw": r.supply_mw,
-                "renewable_gen_mw": r.renewable_gen_mw,
-                "temperature": r.temperature,
-            }
-            for r in rows
-        ]
-    )
-
-    # Optionally limit to the most recent N days
     if req.max_days:
         dates = sorted(df["date"].unique())[-req.max_days :]
         df = df[df["date"].isin(dates)]
 
-    model = PriceForecastModel(segment=segment)
-
-    # Build kwargs for model.train()
     train_kwargs = {
         "test_size": req.test_size,
         "shuffle": req.shuffle,
+        "peak_block_weight": req.peak_block_weight,
     }
-
     if req.hyperparams:
         train_kwargs["hyperparams"] = req.hyperparams.model_dump(exclude_none=True)
-
     if req.tuning:
         train_kwargs["tuning"] = req.tuning.model_dump(exclude_none=True)
-
     if req.features:
         train_kwargs["feature_cfg"] = req.features.model_dump()
 
-    train_kwargs["peak_block_weight"] = req.peak_block_weight
-
-    metrics = model.train(df, **train_kwargs)
+    model = PriceForecastModel(segment=segment)
+    try:
+        train_metrics = await asyncio.to_thread(model.train, df, **train_kwargs)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     _models[segment] = model
-    _invalidate_history_cache(segment)
 
-    return {"status": "trained", "segment": segment, "metrics": metrics}
+    return {"status": "trained", "segment": segment, "metrics": train_metrics}

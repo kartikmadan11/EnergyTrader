@@ -5,24 +5,22 @@ Supports parameterised training with hyperparameter tuning.
 """
 
 import pickle
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.inspection import permutation_importance
+from sklearn.metrics import r2_score
 from sklearn.model_selection import (
-    train_test_split,
-    RandomizedSearchCV,
     GridSearchCV,
+    RandomizedSearchCV,
     TimeSeriesSplit,
+    train_test_split,
 )
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error, r2_score
-from scipy.stats import uniform, randint
 
-from common.config import NUM_BLOCKS, DATA_DIR
+from common.config import DATA_DIR, NUM_BLOCKS
+
+from . import metrics
 
 MODEL_DIR = DATA_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -58,6 +56,9 @@ BASE_FEATURE_NAMES = [
     "block_cos",
 ]
 
+# Hourly weather features (added when trained with include_weather)
+WEATHER_FEATURE_NAMES = ("wind_speed_ms", "solar_radiation_wm2", "cloud_cover_pct")
+
 # Default tuning search space
 DEFAULT_PARAM_GRID = {
     "max_iter": [200, 300, 500, 800, 1200],
@@ -80,8 +81,8 @@ class PriceForecastModel:
     def _build_features(
         self,
         df: pd.DataFrame,
-        extra_lags: Optional[list] = None,
-        rolling_windows: Optional[list] = None,
+        extra_lags: list | None = None,
+        rolling_windows: list | None = None,
         include_demand_supply_ratio: bool = True,
         include_price_momentum: bool = True,
         include_ema: bool = True,
@@ -109,12 +110,12 @@ class PriceForecastModel:
         df["lag_price_1d"] = df.groupby("block")["mcp"].shift(1)
         df["lag_price_7d"] = df.groupby("block")["mcp"].shift(7)
 
-        # Lag demand/supply/renewable — closes train/predict mismatch.
+        # Lag demand/supply/renewable - closes train/predict mismatch.
         # At prediction time we only know T-1 grid conditions; training must use the
         # same shifted values so the model sees what will actually be available.
         for _raw, _lag in [
-            ("demand_mw",       "lag_demand_1d"),
-            ("supply_mw",       "lag_supply_1d"),
+            ("demand_mw", "lag_demand_1d"),
+            ("supply_mw", "lag_supply_1d"),
             ("renewable_gen_mw", "lag_renewable_1d"),
         ]:
             if _raw in df.columns:
@@ -142,10 +143,10 @@ class PriceForecastModel:
             avg_col = f"rolling_avg_{w}d"
             std_col = f"rolling_std_{w}d"
             df[avg_col] = df.groupby("block")["mcp"].transform(
-                lambda x: x.shift(1).rolling(w, min_periods=1).mean()
+                lambda x, w=w: x.shift(1).rolling(w, min_periods=1).mean()
             )
             df[std_col] = df.groupby("block")["mcp"].transform(
-                lambda x: x.shift(1).rolling(w, min_periods=1).std().fillna(0)
+                lambda x, w=w: x.shift(1).rolling(w, min_periods=1).std().fillna(0)
             )
             # Only add if not already in base features
             if avg_col not in feature_names:
@@ -157,16 +158,16 @@ class PriceForecastModel:
         for w in rolling_windows:
             med_col = f"rolling_median_{w}d"
             df[med_col] = df.groupby("block")["mcp"].transform(
-                lambda x: x.shift(1).rolling(w, min_periods=1).median()
+                lambda x, w=w: x.shift(1).rolling(w, min_periods=1).median()
             )
             feature_names.append(med_col)
 
-        # Demand/supply ratio — use lagged values (T-1) to match prediction time
+        # Demand/supply ratio - use lagged values (T-1) to match prediction time
         if include_demand_supply_ratio:
             df["demand_supply_ratio"] = df["lag_demand_1d"] / df["lag_supply_1d"].clip(lower=1)
             feature_names.append("demand_supply_ratio")
 
-        # Price momentum (rate of change) — shifted by 1 to prevent data leakage.
+        # Price momentum (rate of change) - shifted by 1 to prevent data leakage.
         # At prediction time we pass yesterday's momentum; training must match.
         if include_price_momentum:
             df["price_momentum"] = (
@@ -174,7 +175,7 @@ class PriceForecastModel:
             )
             feature_names.append("price_momentum")
 
-        # Exponential moving average — shifted by 1 to prevent data leakage.
+        # Exponential moving average - shifted by 1 to prevent data leakage.
         # Without shift, ema[t] = 0.25 × price[t] + 0.75 × ema[t-1], which embeds
         # today's price in the feature and causes train/predict mismatch.
         if include_ema:
@@ -203,7 +204,7 @@ class PriceForecastModel:
 
         # ── Weather features (toggled by include_weather) ──────────────────
         if include_weather:
-            for col in ["wind_speed_ms", "solar_radiation_wm2", "cloud_cover_pct"]:
+            for col in WEATHER_FEATURE_NAMES:
                 if col not in df.columns:
                     df[col] = np.nan
                 feature_names.append(col)
@@ -212,10 +213,11 @@ class PriceForecastModel:
         if include_holidays:
             try:
                 from data.enrich_pipeline import compute_holiday_features
+
                 df["is_holiday"], df["days_to_holiday"] = compute_holiday_features(df["datetime"])
                 feature_names += ["is_holiday", "days_to_holiday"]
             except Exception:
-                pass  # enrich_pipeline unavailable — skip silently
+                pass  # enrich_pipeline unavailable - skip silently
 
         # ── Month cyclic encoding (toggled by include_month_cyclic) ────────
         if include_month_cyclic:
@@ -235,22 +237,24 @@ class PriceForecastModel:
             ).fillna(0)
             feature_names.append("price_range_7d")
 
-        # ── Summer onset signal (India peak-demand season Apr–Jun) ─────────
-        # is_summer: binary flag for April–June (peak cooling demand period)
-        # max_temp_7d: 7-day rolling max temperature — captures heat accumulation
+        # ── Summer onset signal (India peak-demand season Apr-Jun) ─────────
+        # is_summer: binary flag for April-June (peak cooling demand period)
+        # max_temp_7d: 7-day rolling max temperature - captures heat accumulation
         # trend. Predicts demand spikes better than single-day temp alone.
         if include_summer_signal:
             df["is_summer"] = df["month"].isin([4, 5, 6]).astype(int)
             feature_names.append("is_summer")
             if "temperature" in df.columns:
-                df["max_temp_7d"] = df.groupby("block")["temperature"].transform(
-                    lambda x: x.shift(1).rolling(7, min_periods=1).max()
-                ).fillna(df["temperature"])
+                df["max_temp_7d"] = (
+                    df.groupby("block")["temperature"]
+                    .transform(lambda x: x.shift(1).rolling(7, min_periods=1).max())
+                    .fillna(df["temperature"])
+                )
                 feature_names.append("max_temp_7d")
 
-        # ── Renewable share — use lagged values to match prediction time ────
+        # ── Renewable share - use lagged values to match prediction time ────
         # Key driver of near-zero RTM prices: high solar share → oversupply →
-        # price collapse. Always included — no toggle needed, cost is trivial.
+        # price collapse. Always included - no toggle needed, cost is trivial.
         if "lag_renewable_1d" in df.columns and "lag_demand_1d" in df.columns:
             df["renewable_share"] = (
                 df["lag_renewable_1d"] / df["lag_demand_1d"].clip(lower=1)
@@ -265,9 +269,9 @@ class PriceForecastModel:
         df: pd.DataFrame,
         test_size: float = 0.2,
         shuffle: bool = False,
-        hyperparams: Optional[dict] = None,
-        tuning: Optional[dict] = None,
-        feature_cfg: Optional[dict] = None,
+        hyperparams: dict | None = None,
+        tuning: dict | None = None,
+        feature_cfg: dict | None = None,
         peak_block_weight: float = 2.0,
     ):
         """
@@ -275,9 +279,9 @@ class PriceForecastModel:
 
         Parameters
         ----------
-        hyperparams : dict  – Passed directly to HistGradientBoostingRegressor
-        tuning      : dict  – If provided, runs CV search. Keys: method, n_iter, cv_folds, scoring, param_grid
-        feature_cfg : dict  – Passed to _build_features (extra_lags, rolling_windows, …)
+        hyperparams : dict  - Passed directly to HistGradientBoostingRegressor
+        tuning      : dict  - If provided, runs CV search. Keys: method, n_iter, cv_folds, scoring, param_grid
+        feature_cfg : dict  - Passed to _build_features (extra_lags, rolling_windows, …)
         """
         df = df[df["segment"] == self.segment].copy()
         if len(df) < NUM_BLOCKS * 10:
@@ -292,17 +296,15 @@ class PriceForecastModel:
 
         # Keep index aligned so we can recover which dates went to train vs test
         idx = np.arange(len(df))
-        idx_train, idx_test = train_test_split(
-            idx, test_size=test_size, shuffle=shuffle
-        )
+        idx_train, idx_test = train_test_split(idx, test_size=test_size, shuffle=shuffle)
         X_train, X_test = X[idx_train], X[idx_test]
         y_train, y_test = y[idx_train], y[idx_test]
 
         # ── Sample weights: peak blocks + recency ──────────────────────────
-        # peak_block_weight > 1 → model optimises harder on economically critical
+        # peak_block_weight > 1 → model optimizes harder on economically critical
         # mid-day blocks where DSM penalties and bid clearing are concentrated.
         # Recency weighting: exponential decay so recent months count more than
-        # 2022–2023 data (different price regime due to renewable penetration shift).
+        # 2022-2023 data (different price regime due to renewable penetration shift).
         train_blocks = df["block"].values[idx_train]
         peak_mask = (train_blocks >= 32) & (train_blocks <= 64)
         sample_weights = np.where(peak_mask, float(peak_block_weight), 1.0)
@@ -317,7 +319,7 @@ class PriceForecastModel:
 
         all_dates = df["date"].values
         train_dates_sorted = sorted(set(all_dates[idx_train]))
-        test_dates_sorted  = sorted(set(all_dates[idx_test]))
+        test_dates_sorted = sorted(set(all_dates[idx_test]))
 
         best_params = None
 
@@ -326,9 +328,7 @@ class PriceForecastModel:
             raw_grid = tuning.get("param_grid") or {}
             # Sanitise: sklearn requires each value to be a list/array.
             # Drop any keys with non-list values (e.g. Swagger placeholder {}).
-            valid_grid = {
-                k: v for k, v in raw_grid.items() if isinstance(v, (list, tuple))
-            }
+            valid_grid = {k: v for k, v in raw_grid.items() if isinstance(v, (list, tuple))}
             param_grid = valid_grid if valid_grid else DEFAULT_PARAM_GRID
             method = tuning.get("method", "random")
             cv_folds = tuning.get("cv_folds", 5)
@@ -397,7 +397,7 @@ class PriceForecastModel:
 
         # ── Save model + metadata ───────────────────────────────────
         self.train_dates: list[str] = train_dates_sorted
-        self.test_dates:  list[str] = test_dates_sorted
+        self.test_dates: list[str] = test_dates_sorted
         with open(self.model_path, "wb") as f:
             pickle.dump(
                 {
@@ -405,49 +405,20 @@ class PriceForecastModel:
                     "importances": self.feature_importances,
                     "feature_names": self.feature_names,
                     "train_dates": train_dates_sorted,
-                    "test_dates":  test_dates_sorted,
+                    "test_dates": test_dates_sorted,
                 },
                 f,
             )
 
         # ── Evaluate ────────────────────────────────────────────────
         preds = self.model.predict(X_test)
-        mape = mean_absolute_percentage_error(y_test, preds) * 100
-        rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
-        r2 = float(r2_score(y_test, preds))
-        mae = float(np.mean(np.abs(y_test - preds)))
+        test_mape = metrics.mape(y_test, preds)
 
-        # sMAPE – symmetric, robust to near-zero actual values
-        smape = float(
-            np.mean(
-                2 * np.abs(y_test - preds) / (np.abs(y_test) + np.abs(preds) + 1e-10)
-            )
-            * 100
-        )
-
-        # Filtered MAPE – exclude rows with actual < 1.0 (near-zero noise)
-        mask = np.abs(y_test) >= 1.0
-        filtered_mape = (
-            float(mean_absolute_percentage_error(y_test[mask], preds[mask]) * 100)
-            if mask.sum() > 0
-            else mape
-        )
-
-        # Per-block MAPE (using the test portion of the data)
-        test_df = df.iloc[-len(X_test) :].copy()
-        test_df["pred"] = preds
-        block_mape = (
-            test_df.groupby("block")
-            .apply(
-                lambda g: np.mean(
-                    2
-                    * np.abs(g["mcp"] - g["pred"])
-                    / (np.abs(g["mcp"]) + np.abs(g["pred"]) + 1e-10)
-                )
-                * 100
-            )
-            .to_dict()
-        )
+        # Per-block sMAPE over the test rows, to surface the hardest blocks.
+        test_df = df.iloc[idx_test][["block", "mcp"]].assign(pred=preds)
+        block_smape = {
+            int(block): metrics.smape(g["mcp"], g["pred"]) for block, g in test_df.groupby("block")
+        }
 
         # Top features
         top_idx = np.argsort(self.feature_importances)[-10:][::-1]
@@ -460,20 +431,20 @@ class PriceForecastModel:
         ]
 
         result = {
-            "mape": round(mape, 2),
-            "smape": round(smape, 2),
-            "filtered_mape": round(filtered_mape, 2),
-            "rmse": round(rmse, 2),
-            "mae": round(mae, 2),
-            "r2": round(r2, 4),
+            "mape": round(test_mape, 2) if test_mape is not None else None,
+            "smape": round(metrics.smape(y_test, preds), 2),
+            "rmse": round(metrics.rmse(y_test, preds), 2),
+            "mae": round(metrics.mae(y_test, preds), 2),
+            "r2": round(float(r2_score(y_test, preds)), 4),
             "train_size": len(X_train),
             "test_size": len(X_test),
             "n_features": len(feature_names),
             "feature_names": feature_names,
             "top_features": top_features,
-            "block_mape_worst_5": dict(
-                sorted(block_mape.items(), key=lambda x: x[1], reverse=True)[:5]
-            ),
+            "block_smape_worst_5": {
+                block: round(v, 2)
+                for block, v in sorted(block_smape.items(), key=lambda x: x[1], reverse=True)[:5]
+            },
         }
         if best_params:
             result["best_params"] = {k: _serialise(v) for k, v in best_params.items()}
@@ -491,7 +462,7 @@ class PriceForecastModel:
                 self.feature_importances = data["importances"]
                 self.feature_names = data.get("feature_names", list(BASE_FEATURE_NAMES))
                 self.train_dates: list[str] = data.get("train_dates", [])
-                self.test_dates:  list[str] = data.get("test_dates", [])
+                self.test_dates: list[str] = data.get("test_dates", [])
             else:
                 self.model = data
                 self.feature_importances = np.ones(len(BASE_FEATURE_NAMES)) / len(
@@ -499,14 +470,28 @@ class PriceForecastModel:
                 )
                 self.feature_names = list(BASE_FEATURE_NAMES)
                 self.train_dates = []
-                self.test_dates  = []
+                self.test_dates = []
             return True
         return False
 
-    def predict(self, target_date: str, history_df: pd.DataFrame) -> list[dict]:
+    @property
+    def uses_weather(self) -> bool:
+        """Whether the trained model takes hourly weather features."""
+        return any(fn in self.feature_names for fn in WEATHER_FEATURE_NAMES)
+
+    def predict(
+        self,
+        target_date: str,
+        history_df: pd.DataFrame,
+        weather_by_hour: dict[int, dict] | None = None,
+    ) -> list[dict]:
         """
         Generate price predictions for all 96 blocks on target_date.
         Returns list of dicts with prediction, confidence interval, and feature importances.
+
+        weather_by_hour is target_date's hourly weather keyed 0-23, as returned by
+        data.scrape_weather. When omitted, a model that uses weather fetches it itself;
+        callers forecasting many dates should fetch the whole range once and pass it in.
         """
         if self.model is None:
             if not self.load():
@@ -563,28 +548,14 @@ class PriceForecastModel:
         target_7d_str = (target_dt - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
 
         day_1d_map: dict = (
-            raw_seg[raw_seg["_date_str"] == target_1d_str]
-            .set_index("block")["mcp"]
-            .to_dict()
+            raw_seg[raw_seg["_date_str"] == target_1d_str].set_index("block")["mcp"].to_dict()
         )
         day_2d_map: dict = (
-            raw_seg[raw_seg["_date_str"] == target_2d_str]
-            .set_index("block")["mcp"]
-            .to_dict()
+            raw_seg[raw_seg["_date_str"] == target_2d_str].set_index("block")["mcp"].to_dict()
         )
         day_7d_map: dict = (
-            raw_seg[raw_seg["_date_str"] == target_7d_str]
-            .set_index("block")["mcp"]
-            .to_dict()
+            raw_seg[raw_seg["_date_str"] == target_7d_str].set_index("block")["mcp"].to_dict()
         )
-
-        # T-7 demand/supply/renewable: better proxy for target-day grid conditions
-        # than T-1, especially for holidays (Holi, Ram Navami, etc.) where
-        # next-day demand is structurally different from the preceding day.
-        _d7 = raw_seg[raw_seg["_date_str"] == target_7d_str]
-        demand_7d_map:    dict = _d7.set_index("block")["demand_mw"].dropna().to_dict()    if "demand_mw"    in raw_seg.columns else {}
-        supply_7d_map:    dict = _d7.set_index("block")["supply_mw"].dropna().to_dict()    if "supply_mw"    in raw_seg.columns else {}
-        renewable_7d_map: dict = _d7.set_index("block")["renewable_gen_mw"].dropna().to_dict() if "renewable_gen_mw" in raw_seg.columns else {}
 
         # Build exact lookups for any extra lag features
         extra_lag_maps: dict[str, dict] = {}
@@ -594,9 +565,7 @@ class PriceForecastModel:
                 "lag_price_7d",
             ):
                 lag_d = int(fn.replace("lag_price_", "").replace("d", ""))
-                lag_date_str = (
-                    target_dt - pd.Timedelta(days=lag_d)
-                ).strftime("%Y-%m-%d")
+                lag_date_str = (target_dt - pd.Timedelta(days=lag_d)).strftime("%Y-%m-%d")
                 extra_lag_maps[fn] = (
                     raw_seg[raw_seg["_date_str"] == lag_date_str]
                     .set_index("block")["mcp"]
@@ -627,37 +596,27 @@ class PriceForecastModel:
         # for each block, derived directly from raw history (no last_day mismatch).
         target_dow = int(target_dt.dayofweek)
         same_dow_avg_map: dict = {}
-        same_dow_demand_map:    dict = {}
-        same_dow_supply_map:    dict = {}
-        same_dow_renewable_map: dict = {}
-        same_dow_history = (
-            raw_seg[
-                (pd.to_datetime(raw_seg["_date_str"]) < target_dt)
-                & (pd.to_datetime(raw_seg["_date_str"]).dt.dayofweek == target_dow)
-            ]
-            .sort_values("date")
-        )
+        same_dow_history = raw_seg[
+            (pd.to_datetime(raw_seg["_date_str"]) < target_dt)
+            & (pd.to_datetime(raw_seg["_date_str"]).dt.dayofweek == target_dow)
+        ].sort_values("date")
         if "same_dow_avg_4w" in feature_names:
             for blk, grp in same_dow_history.groupby("block"):
                 tail4 = grp["mcp"].tail(4)
                 same_dow_avg_map[int(blk)] = float(tail4.mean()) if len(tail4) > 0 else float("nan")
-        # same_dow averages for demand/supply/renewable — better proxy than T-1 or T-7
-        # because it matches the same weekday pattern (Mon ~ Mon, holiday distribution).
-        for blk, grp in same_dow_history.groupby("block"):
-            grp_sorted = grp.sort_values("date").tail(4)
-            if "demand_mw"    in grp.columns: same_dow_demand_map[int(blk)]    = float(grp_sorted["demand_mw"].dropna().mean())    if len(grp_sorted["demand_mw"].dropna()) > 0 else float("nan")
-            if "supply_mw"    in grp.columns: same_dow_supply_map[int(blk)]    = float(grp_sorted["supply_mw"].dropna().mean())    if len(grp_sorted["supply_mw"].dropna()) > 0 else float("nan")
-            if "renewable_gen_mw" in grp.columns: same_dow_renewable_map[int(blk)] = float(grp_sorted["renewable_gen_mw"].dropna().mean()) if len(grp_sorted["renewable_gen_mw"].dropna()) > 0 else float("nan")
 
         # ── Weather forecast for target_date (per hour, keyed 0-23) ───────────
-        # Only fetches if the model was trained with weather features.
-        weather_by_hour: dict[int, dict] = {}
-        if any(fn in feature_names for fn in ("wind_speed_ms", "solar_radiation_wm2", "cloud_cover_pct")):
-            try:
-                from data.scrape_weather import fetch_forecast_for_date
-                weather_by_hour = fetch_forecast_for_date(target_date)
-            except Exception:
-                pass  # silently fall through to NaN / last_day values
+        # Only fetched if the model was trained with weather features and the
+        # caller did not supply it.
+        if weather_by_hour is None:
+            weather_by_hour = {}
+            if self.uses_weather:
+                try:
+                    from data.scrape_weather import fetch_forecast_for_date
+
+                    weather_by_hour = fetch_forecast_for_date(target_date)
+                except Exception:
+                    pass  # silently fall through to NaN / last_day values
 
         # ── Holiday features for target_date ──────────────────────────────────
         _is_holiday = 0
@@ -665,17 +624,20 @@ class PriceForecastModel:
         if "is_holiday" in feature_names or "days_to_holiday" in feature_names:
             try:
                 from data.enrich_pipeline import compute_holiday_features
-                _h_series, _dtoh_series = compute_holiday_features(
-                    pd.Series([target_date])
-                )
-                _is_holiday      = int(_h_series.iloc[0])
+
+                _h_series, _dtoh_series = compute_holiday_features(pd.Series([target_date]))
+                _is_holiday = int(_h_series.iloc[0])
                 _days_to_holiday = int(_dtoh_series.iloc[0])
             except Exception:
                 pass
 
         # ── Derived cyclic / range features ───────────────────────────────────
-        _month_sin = float(np.sin(2 * np.pi * target_dt.month / 12)) if "month_sin" in feature_names else 0.0
-        _month_cos = float(np.cos(2 * np.pi * target_dt.month / 12)) if "month_cos" in feature_names else 0.0
+        _month_sin = (
+            float(np.sin(2 * np.pi * target_dt.month / 12)) if "month_sin" in feature_names else 0.0
+        )
+        _month_cos = (
+            float(np.cos(2 * np.pi * target_dt.month / 12)) if "month_cos" in feature_names else 0.0
+        )
         _is_summer = int(target_dt.month in (4, 5, 6)) if "is_summer" in feature_names else 0
 
         # max_temp_7d: rolling max temperature of the last 7 days (per block)
@@ -691,6 +653,8 @@ class PriceForecastModel:
                     vals = grp["temperature"].dropna()
                     _max_temp_7d_map[int(blk)] = float(vals.max()) if len(vals) > 0 else 30.0
 
+        feature_rows: list[list[float]] = []
+        block_rolling_std: list[float] = []
         for block_num in range(1, NUM_BLOCKS + 1):
             row = last_day[last_day["block"] == block_num]
 
@@ -711,14 +675,38 @@ class PriceForecastModel:
             rolling_std = rolling_std_map.get(block_num, 0.5)
 
             # T-1 demand/supply/renewable: exactly known at prediction time (D-1).
-            # No approximation needed — closes the train/predict feature mismatch.
-            _d1_demand  = float(row["demand_mw"].values[0])    if len(row) > 0 and "demand_mw"    in row.columns and not pd.isna(row["demand_mw"].values[0])    else 45000
-            _d1_supply  = float(row["supply_mw"].values[0])    if len(row) > 0 and "supply_mw"    in row.columns and not pd.isna(row["supply_mw"].values[0])    else 44000
-            _d1_renew   = float(row["renewable_gen_mw"].values[0]) if len(row) > 0 and "renewable_gen_mw" in row.columns and not pd.isna(row["renewable_gen_mw"].values[0]) else 5000
-            demand    = _d1_demand
-            supply    = _d1_supply
+            # No approximation needed - closes the train/predict feature mismatch.
+            _d1_demand = (
+                float(row["demand_mw"].values[0])
+                if len(row) > 0
+                and "demand_mw" in row.columns
+                and not pd.isna(row["demand_mw"].values[0])
+                else 45000
+            )
+            _d1_supply = (
+                float(row["supply_mw"].values[0])
+                if len(row) > 0
+                and "supply_mw" in row.columns
+                and not pd.isna(row["supply_mw"].values[0])
+                else 44000
+            )
+            _d1_renew = (
+                float(row["renewable_gen_mw"].values[0])
+                if len(row) > 0
+                and "renewable_gen_mw" in row.columns
+                and not pd.isna(row["renewable_gen_mw"].values[0])
+                else 5000
+            )
+            demand = _d1_demand
+            supply = _d1_supply
             renewable = _d1_renew
-            temp = float(row["temperature"].values[0]) if len(row) > 0 and "temperature" in row.columns and not pd.isna(row["temperature"].values[0]) else 30.0
+            temp = (
+                float(row["temperature"].values[0])
+                if len(row) > 0
+                and "temperature" in row.columns
+                and not pd.isna(row["temperature"].values[0])
+                else 30.0
+            )
 
             # Weather for this block's hour (from Open-Meteo forecast)
             block_hour = (block_num - 1) // 4
@@ -744,38 +732,45 @@ class PriceForecastModel:
             feat_values["block_sin"] = block_sin
             feat_values["block_cos"] = block_cos
             # price_momentum[T] = (mcp[T-1] - mcp[T-2]) / mcp[T-2]
-            # Training uses shift(1) of pct_change — must match exactly.
+            # Training uses shift(1) of pct_change - must match exactly.
             if "price_momentum" in feature_names:
                 _lag2 = day_2d_map.get(block_num, lag_1d)
                 feat_values["price_momentum"] = (
-                    (lag_1d - _lag2) / max(abs(_lag2), 1e-6)
-                    if _lag2 != lag_1d else 0.0
+                    (lag_1d - _lag2) / max(abs(_lag2), 1e-6) if _lag2 != lag_1d else 0.0
                 )
             # ema_price[T] = ewm up to T-1.  last_day holds ewm up to T-2,
             # so apply one more EMA step: alpha*mcp[T-1] + (1-alpha)*ema[T-2].
             if "ema_price" in feature_names:
                 _alpha = 2.0 / (7 + 1)
-                _ema_prev = float(row["ema_price"].values[0]) if len(row) > 0 and "ema_price" in row.columns and not pd.isna(row["ema_price"].values[0]) else lag_1d
+                _ema_prev = (
+                    float(row["ema_price"].values[0])
+                    if len(row) > 0
+                    and "ema_price" in row.columns
+                    and not pd.isna(row["ema_price"].values[0])
+                    else lag_1d
+                )
                 feat_values["ema_price"] = _alpha * lag_1d + (1.0 - _alpha) * _ema_prev
             # Weather features
-            feat_values["wind_speed_ms"]       = w.get("wind_speed_ms",       float("nan"))
+            feat_values["wind_speed_ms"] = w.get("wind_speed_ms", float("nan"))
             feat_values["solar_radiation_wm2"] = w.get("solar_radiation_wm2", float("nan"))
-            feat_values["cloud_cover_pct"]     = w.get("cloud_cover_pct",     float("nan"))
+            feat_values["cloud_cover_pct"] = w.get("cloud_cover_pct", float("nan"))
             # Holiday features
-            feat_values["is_holiday"]      = _is_holiday
+            feat_values["is_holiday"] = _is_holiday
             feat_values["days_to_holiday"] = _days_to_holiday
             # Cyclic month encoding
             feat_values["month_sin"] = _month_sin
             feat_values["month_cos"] = _month_cos
             # Summer onset signal
-            feat_values["is_summer"]   = _is_summer
-            feat_values["max_temp_7d"] = _max_temp_7d_map.get(block_num, feat_values.get("temperature", 30.0))
+            feat_values["is_summer"] = _is_summer
+            feat_values["max_temp_7d"] = _max_temp_7d_map.get(
+                block_num, feat_values.get("temperature", 30.0)
+            )
             # Renewable share
-            feat_values["renewable_share"] = (
-                feat_values.get("lag_renewable_1d", 0) / max(feat_values.get("lag_demand_1d", 1), 1)
+            feat_values["renewable_share"] = feat_values.get("lag_renewable_1d", 0) / max(
+                feat_values.get("lag_demand_1d", 1), 1
             )
 
-            # Populate dynamic features — use exact date lookups for lag features,
+            # Populate dynamic features - use exact date lookups for lag features,
             # same-dow lookup for same_dow_avg_4w, rolling maps for rolling stats,
             # fall back to last_day's engineered columns for everything else.
             for fn in feature_names:
@@ -795,31 +790,38 @@ class PriceForecastModel:
                     else:
                         feat_values[fn] = 0.0
 
-            features = np.array([[feat_values[fn] for fn in feature_names]])
+            feature_rows.append([feat_values[fn] for fn in feature_names])
+            block_rolling_std.append(rolling_std)
 
-            pred = float(self.model.predict(features)[0])
-            pred = max(pred, 0.01)  # price can't be negative
+        # One call for all blocks: each predict call walks every tree, so its cost
+        # is nearly the same for one row as for 96.
+        preds = self.model.predict(np.array(feature_rows))
+
+        # Feature importances (from permutation importance computed during training)
+        importances = (
+            self.feature_importances
+            if self.feature_importances is not None
+            else np.ones(len(feature_names)) / len(feature_names)
+        )
+        top_idx = np.argsort(importances)[-5:][::-1]
+        top_features = [
+            {
+                "feature": feature_names[i],
+                "importance": round(float(importances[i]), 4),
+            }
+            for i in top_idx
+            if i < len(feature_names)
+        ]
+
+        for block_num, raw_pred, rolling_std in zip(
+            range(1, NUM_BLOCKS + 1), preds, block_rolling_std, strict=True
+        ):
+            pred = max(float(raw_pred), 0.01)  # price can't be negative
 
             # Confidence interval from rolling std + model uncertainty
             uncertainty = max(rolling_std * 0.5, pred * 0.08)
             conf_low = max(pred - 1.96 * uncertainty, 0.01)
             conf_high = pred + 1.96 * uncertainty
-
-            # Feature importances (from permutation importance computed during training)
-            importances = (
-                self.feature_importances
-                if self.feature_importances is not None
-                else np.ones(len(feature_names)) / len(feature_names)
-            )
-            top_idx = np.argsort(importances)[-5:][::-1]
-            top_features = [
-                {
-                    "feature": feature_names[i],
-                    "importance": round(float(importances[i]), 4),
-                }
-                for i in top_idx
-                if i < len(feature_names)
-            ]
 
             blocks.append(
                 {

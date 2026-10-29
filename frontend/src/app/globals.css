@@ -28,59 +28,47 @@
   }
 }
 
-.card {
-  @apply bg-white border border-[var(--border)] rounded-lg p-4 shadow-sm;
-}
+@layer components {
+  .card {
+    @apply bg-white border border-[var(--border)] rounded-lg p-4 shadow-sm;
+  }
 
-.card-hover {
-  @apply bg-white border border-[var(--border)] rounded-lg p-4 shadow-sm
-         hover:bg-[var(--bg-card-hover)] hover:border-[#C7D9EC] transition-colors;
-}
+  .btn-primary {
+    @apply bg-[var(--brand-blue)] hover:bg-[var(--brand-blue-dark)] text-white text-sm font-medium py-2 px-4 rounded-lg transition-colors;
+  }
 
-.btn-primary {
-  @apply bg-[var(--brand-blue)] hover:bg-[var(--brand-blue-dark)] text-white font-medium py-2 px-4 rounded-lg transition-colors;
-}
+  .btn-teal {
+    @apply bg-[var(--brand-teal)] hover:bg-[var(--brand-teal-dark)] text-white text-sm font-medium py-2 px-4 rounded-lg transition-colors;
+  }
 
-.btn-teal {
-  @apply bg-[var(--brand-teal)] hover:bg-[var(--brand-teal-dark)] text-white font-medium py-2 px-4 rounded-lg transition-colors;
-}
+  .btn-secondary {
+    @apply bg-white hover:bg-[#EEF5FB] text-[var(--brand-blue)] text-sm font-medium py-2 px-4 rounded-lg transition-colors border border-[var(--border)];
+  }
 
-.btn-secondary {
-  @apply bg-white hover:bg-[#EEF5FB] text-[var(--brand-blue)] font-medium py-2 px-4 rounded-lg transition-colors border border-[var(--border)];
-}
+  .input-field {
+    @apply bg-white border border-[var(--border)] text-gray-900 text-sm rounded-lg px-3 py-2
+           focus:outline-none focus:ring-2 focus:ring-[var(--brand-blue)] focus:border-[var(--brand-blue)];
+  }
 
-.btn-danger {
-  @apply bg-red-700 hover:bg-red-800 text-white font-medium py-2 px-4 rounded-lg transition-colors;
-}
+  .select-field {
+    @apply bg-white border border-[var(--border)] text-gray-900 text-sm rounded-lg px-3 py-2
+           focus:outline-none focus:ring-2 focus:ring-[var(--brand-blue)] focus:border-[var(--brand-blue)];
+  }
 
-.input-field {
-  @apply bg-white border border-[var(--border)] text-gray-900 text-sm rounded-lg px-3 py-2
-         focus:outline-none focus:ring-2 focus:ring-[var(--brand-blue)] focus:border-[var(--brand-blue)];
-}
+  .badge-violation {
+    @apply bg-red-50 text-red-700 border border-red-200 text-xs px-2 py-0.5 rounded-full;
+  }
 
-.select-field {
-  @apply bg-white border border-[var(--border)] text-gray-900 text-sm rounded-lg px-3 py-2
-         focus:outline-none focus:ring-2 focus:ring-[var(--brand-blue)] focus:border-[var(--brand-blue)];
-}
+  .badge-ok {
+    @apply bg-gray-100 text-gray-500 border border-gray-200 text-xs px-2 py-0.5 rounded-full;
+  }
 
-.badge-violation {
-  @apply bg-red-50 text-red-700 border border-red-200 text-xs px-2 py-0.5 rounded-full;
-}
-
-.badge-ok {
-  @apply bg-gray-100 text-gray-500 border border-gray-200 text-xs px-2 py-0.5 rounded-full;
-}
-
-.badge-warning {
-  @apply bg-amber-50 text-amber-700 border border-amber-200 text-xs px-2 py-0.5 rounded-full;
+  .badge-warning {
+    @apply bg-amber-50 text-amber-700 border border-amber-200 text-xs px-2 py-0.5 rounded-full;
+  }
 }
 
 /* Header gradient strip */
 .header-gradient {
   background: linear-gradient(90deg, #006DAE 0%, #005A91 60%, #003F6B 100%);
 }
-
-/* Trading-specific: green/red tickers */
-.tick-up   { @apply text-[var(--brand-teal)]; }
-.tick-down { @apply text-red-400; }
-.tick-flat { @apply text-gray-400; }

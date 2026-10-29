@@ -1,5 +1,0 @@
-[[index]]
-name = "pypi-virtual"
-publish-url = "https://infyartifactory.jfrog.io/artifactory/api/pypi/pypi-virtual"
-url = "https://infyartifactory.jfrog.io/artifactory/api/pypi/pypi-virtual/simple"
-default = true

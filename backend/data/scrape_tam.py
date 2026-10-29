@@ -11,27 +11,23 @@ Returns tableData with per-block, per-region, per-contract-type trade records.
 We extract DAC (Day Ahead Contingency) contract records for block-level data
 comparable to DAM/RTM 96-block market snapshots.
 
-Usage:
-    cd /path/to/makeathon-20
-    source .venv/bin/activate
-    python -m backend.data.scrape_tam --start 2025-10-01 --end 2026-03-30
+Usage (from backend/):
+    uv run python -m data.scrape_tam --start 2025-10-01 --end 2026-03-30
 """
 
 import argparse
 import json
+import logging
 import re
 import sqlite3
 import time
-import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import requests
+from common.config import DB_PATH
+from common.http import requests_session
 
-warnings.filterwarnings("ignore", message="Unverified HTTPS")
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "data" / "platform.db"
+logger = logging.getLogger(__name__)
 
 RSC_URL = "https://www.iexindia.com/market-data/intra-day-ahead-contingency/trade-details"
 RSC_HEADERS = {
@@ -40,8 +36,7 @@ RSC_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
 }
 
-SESSION = requests.Session()
-SESSION.verify = False
+SESSION = requests_session()
 
 
 def to_ddmmyyyy(iso_date: str) -> str:
@@ -89,7 +84,7 @@ def fetch_tam_rsc(from_date: str, to_date: str, contract_type: str = "ALL") -> l
 
 def parse_instrument(instrument_name: str):
     """Parse instrument name like 'DAC-B26-NR' into block and region.
-    
+
     Formats:
       DAC-B{block}-{region}   -> DAC contract, block 1-96, region NR/SR/ER/WR
       B{block}-{day}-{region} -> DAILY contract (day of week)
@@ -121,7 +116,7 @@ def convert_date(dd_mm_yyyy: str) -> str:
 
 def records_to_rows(records: list[dict], region: str = "NR") -> list[dict]:
     """Convert TAM trade-details records to DB rows.
-    
+
     Filters to DAC contract type and specified region for 96-block comparable data.
     Price is in Rs/MWh from the API; we convert to INR/kWh (divide by 1000).
     """
@@ -200,9 +195,16 @@ def store_rows(rows: list[dict], db_path: Path) -> int:
                (date, block, segment, exchange, mcp, mcv, demand_mw, supply_mw, renewable_gen_mw, temperature)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                r["date"], r["block"], r["segment"], r["exchange"],
-                r["mcp"], r["mcv"], r["demand_mw"], r["supply_mw"],
-                r["renewable_gen_mw"], r["temperature"],
+                r["date"],
+                r["block"],
+                r["segment"],
+                r["exchange"],
+                r["mcp"],
+                r["mcv"],
+                r["demand_mw"],
+                r["supply_mw"],
+                r["renewable_gen_mw"],
+                r["temperature"],
             ),
         )
         inserted += 1
@@ -220,7 +222,7 @@ def month_ranges(start: str, end: str):
         if month_end > e:
             month_end = e
         yield s.strftime("%Y-%m-%d"), month_end.strftime("%Y-%m-%d")
-        s = (month_end + timedelta(days=1))
+        s = month_end + timedelta(days=1)
 
 
 def main():
@@ -229,20 +231,26 @@ def main():
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     parser.add_argument("--region", default="NR", help="Region filter: NR, SR, ER, WR (default NR)")
     parser.add_argument("--db", default=str(DB_PATH), help="SQLite DB path")
-    parser.add_argument("--delay", type=float, default=2.0, help="Delay between month requests (sec)")
+    parser.add_argument(
+        "--delay", type=float, default=2.0, help="Delay between month requests (sec)"
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db)
     months = list(month_ranges(args.start, args.end))
 
-    print(f"Scraping TAM (DAC) trade-details for {len(months)} months, region={args.region}")
-    print(f"Database: {db_path}\n")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logger.info(
+        "Scraping TAM (DAC) trade details for %d months, region=%s, into %s",
+        len(months),
+        args.region,
+        db_path,
+    )
 
     total_records = 0
     total_inserted = 0
 
     for i, (m_start, m_end) in enumerate(months):
-        print(f"[{i+1}/{len(months)}] {m_start} to {m_end} ... ", end="", flush=True)
         try:
             raw = fetch_tam_rsc(m_start, m_end, contract_type="DAC")
             rows = records_to_rows(raw, region=args.region)
@@ -251,14 +259,25 @@ def main():
             total_inserted += inserted
             dates = set(r["date"] for r in rows)
             blocks_per_day = len(rows) / len(dates) if dates else 0
-            print(f"{len(raw)} raw -> {len(rows)} blocks ({len(dates)} days, ~{blocks_per_day:.0f} blocks/day), {inserted} new")
+            logger.info(
+                "[%d/%d] %s to %s: %d raw -> %d blocks (%d days, ~%.0f blocks/day), %d new",
+                i + 1,
+                len(months),
+                m_start,
+                m_end,
+                len(raw),
+                len(rows),
+                len(dates),
+                blocks_per_day,
+                inserted,
+            )
         except Exception as e:
-            print(f"ERROR: {e}")
+            logger.error("[%d/%d] %s to %s failed: %s", i + 1, len(months), m_start, m_end, e)
 
         if i < len(months) - 1:
             time.sleep(args.delay)
 
-    print(f"\nDone! Total: {total_records} block-rows, {total_inserted} newly inserted")
+    logger.info("%d block rows, %d newly inserted", total_records, total_inserted)
 
 
 if __name__ == "__main__":

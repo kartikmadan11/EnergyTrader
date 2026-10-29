@@ -9,7 +9,7 @@ const sections = [
     items: [
       {
         href: "/",
-        label: "Dashboard",
+        label: "Workstation",
         icon: (
           <svg
             className="w-4 h-4"
@@ -160,25 +160,6 @@ const sections = [
           </svg>
         ),
       },
-      {
-        href: "/beckn",
-        label: "Beckn / UEI",
-        icon: (
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"
-            />
-          </svg>
-        ),
-      },
     ],
   },
 ];
@@ -188,16 +169,6 @@ export default function Sidebar() {
 
   return (
     <aside className="w-56 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col shrink-0">
-      {/* Platform identity under the header */}
-      <div className="px-4 py-3 border-b border-[var(--border)]">
-        <p className="text-sm font-bold text-gray-900 tracking-wide">
-          EnergyTrader
-        </p>
-        <p className="text-[10px] text-gray-500 mt-0.5">
-          Indian Energy Exchange
-        </p>
-      </div>
-
       <nav className="flex-1 px-2 py-3 space-y-4 overflow-y-auto">
         {sections.map((section) => (
           <div key={section.label}>
@@ -211,10 +182,11 @@ export default function Sidebar() {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-xs transition-all ${
+                    aria-current={isActive ? "page" : undefined}
+                    className={`flex items-center gap-2.5 px-3 py-2 rounded-md border text-xs transition-colors ${
                       isActive
-                        ? "bg-[#EEF5FB] text-[#006DAE] border border-[#006DAE]/20 font-medium"
-                        : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
+                        ? "bg-[#EEF5FB] text-[#006DAE] border-[#006DAE]/20 font-medium"
+                        : "border-transparent text-gray-600 hover:bg-gray-100 hover:text-gray-900"
                     }`}
                   >
                     <span
@@ -234,15 +206,6 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Footer */}
-      <div className="px-4 py-3 border-t border-[var(--border)] space-y-1">
-        <p className="text-[10px] font-semibold text-gray-500">
-          EnergyTrader
-        </p>
-        <p className="text-[9px] text-gray-400">
-          © {new Date().getFullYear()} All rights reserved.
-        </p>
-      </div>
     </aside>
   );
 }
