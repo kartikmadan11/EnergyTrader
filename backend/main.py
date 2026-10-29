@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from approval_service.router import router as approval_router
 from audit_service.router import router as audit_router
 from bid_engine_service.router import router as bid_router
+from blotter_service.router import router as blotter_router
 from common.auth import current_actor, log_auth_mode
 from common.database import init_db
 from forecast_service.router import router as forecast_router
@@ -56,6 +57,7 @@ for router in (
     approval_router,
     risk_router,
     audit_router,
+    blotter_router,
     policy_router,
     scraper_router,
 ):

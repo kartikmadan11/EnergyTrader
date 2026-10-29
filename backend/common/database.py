@@ -25,9 +25,18 @@ def _set_sqlite_pragma(dbapi_conn, _connection_record):
     cursor.close()
 
 
+def _create_schema(conn) -> None:
+    Base.metadata.create_all(conn)
+    # create_all skips tables that already exist, so add indexes declared after a table was
+    # first created.
+    for table in Base.metadata.sorted_tables:
+        for index in table.indexes:
+            index.create(conn, checkfirst=True)
+
+
 async def init_db():
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_create_schema)
 
 
 async def get_db() -> AsyncSession:

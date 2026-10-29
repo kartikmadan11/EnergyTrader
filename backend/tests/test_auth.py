@@ -82,6 +82,7 @@ def test_api_requires_a_token_when_a_secret_is_set(client, secured):
     assert "invalid or expired" in bad.json()["detail"]
 
     assert client.get("/api/audit/log", headers=_bearer()).status_code == 200
+    assert client.get("/api/blotter", headers=_bearer()).status_code == 200
 
 
 def test_health_stays_public(client, secured):
