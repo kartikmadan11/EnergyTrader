@@ -2,12 +2,13 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from approval_service.router import router as approval_router
 from audit_service.router import router as audit_router
 from bid_engine_service.router import router as bid_router
+from common.auth import current_actor, log_auth_mode
 from common.database import init_db
 from forecast_service.router import router as forecast_router
 from jobs.scheduler import start_scheduler, stop_scheduler
@@ -23,6 +24,7 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log_auth_mode()
     await init_db()
     start_scheduler()
     yield
@@ -57,9 +59,10 @@ for router in (
     policy_router,
     scraper_router,
 ):
-    app.include_router(router, prefix="/api")
+    app.include_router(router, prefix="/api", dependencies=[Depends(current_actor)])
 
 
+# Public, so uptime checks need no token.
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "energytrader-api"}

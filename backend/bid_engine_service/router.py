@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approval_service.service import InvalidBidSet, evaluate_bid_set
+from common.auth import Actor, current_actor
 from common.config import BLOCK_DURATION_MIN, STRATEGY_PROFILES
 from common.database import get_db
 from common.dsm_policy import get_active_policy
@@ -89,6 +90,7 @@ async def submit_bids(
     segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
     bids: list[BidItem] = Body(...),
     db: AsyncSession = Depends(get_db),
+    actor: Actor = Depends(current_actor),
 ):
     """
     Submit a bid set for a delivery date and segment.
@@ -132,6 +134,7 @@ async def submit_bids(
     db.add(
         AuditLog(
             session_id=session_id,
+            user=actor.id,
             action="submit",
             entity_type="bid",
             details={
