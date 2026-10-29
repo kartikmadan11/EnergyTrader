@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, Float, String, DateTime, Boolean, Text, JSON
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, String, Text
 from sqlalchemy.sql import func
+
 from .database import Base
 
 
@@ -12,7 +13,7 @@ class PriceHistory(Base):
     date = Column(String(10), nullable=False)  # YYYY-MM-DD
     block = Column(Integer, nullable=False)  # 1-96
     segment = Column(String(5), nullable=False)  # DAM, RTM, TAM
-    exchange = Column(String(10), default="IEX")  # IEX, PXIL, HPX
+    exchange = Column(String(10), default="IEX")
     mcp = Column(Float, nullable=False)  # Market Clearing Price INR/kWh
     mcv = Column(Float)  # Market Clearing Volume MW
     demand_mw = Column(Float)
@@ -39,7 +40,7 @@ class Forecast(Base):
 
 
 class Bid(Base):
-    """Bid entries (AI-recommended or trader-edited)."""
+    """Submitted bids, one row per block, grouped by session_id."""
 
     __tablename__ = "bids"
 
@@ -52,11 +53,10 @@ class Bid(Base):
     strategy = Column(String(20), default="balanced")
     price = Column(Float, nullable=False)  # INR/kWh
     volume_mw = Column(Float, nullable=False)
-    is_ai_recommended = Column(Boolean, default=True)
     is_overridden = Column(Boolean, default=False)
     override_reason = Column(Text)
     constraint_violations = Column(JSON)
-    status = Column(String(20), default="draft")  # draft, submitted, cleared, rejected
+    status = Column(String(20), default="submitted")
 
 
 class RiskSnapshot(Base):
@@ -85,9 +85,7 @@ class AuditLog(Base):
     timestamp = Column(DateTime, server_default=func.now())
     session_id = Column(String(36))
     user = Column(String(100), default="trader")
-    action = Column(
-        String(50), nullable=False
-    )  # create_bid, override, submit, approve, etc.
-    entity_type = Column(String(50))  # bid, forecast, risk
+    action = Column(String(50), nullable=False)  # e.g. pre_trade_check, submit, policy_activate
+    entity_type = Column(String(50))  # bid, policy
     entity_id = Column(Integer)
     details = Column(JSON)

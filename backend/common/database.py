@@ -1,7 +1,8 @@
-from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
-from .config import DATABASE_URL, DATA_DIR
+
+from .config import DATA_DIR, DATABASE_URL
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 

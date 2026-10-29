@@ -4,20 +4,25 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
 
-# Static assets (local swagger-ui bundle — not committed, run: npm install swagger-ui-dist)
-backend/static/
-
-# Data / Models
+# Local runtime state
 backend/data/platform.db
 backend/data/platform.db-shm
 backend/data/platform.db-wal
 backend/data/models/*.pkl
+backend/data/policies/active_policy.txt
+
+# Environment
+.env
+.env.*
+!.env.example
 
 # Frontend
 frontend/node_modules/
 frontend/.next/
-frontend/.env*.local
+frontend/tsconfig.tsbuildinfo
 
 # IDE
 .vscode/

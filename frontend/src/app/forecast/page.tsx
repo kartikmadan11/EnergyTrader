@@ -1,13 +1,19 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   trainModel,
   getDataCoverage,
   getEnrichStatus,
   triggerEnrich,
+  errorMessage,
+  type EnrichStatus,
   type TrainConfig,
+  type TrainResult,
+  type TuneMethod,
+  type TuneScoring,
 } from "@/lib/api";
+import PageHeader from "@/components/PageHeader";
 import { SEGMENTS } from "@/lib/utils";
 
 /* ─── Helpers ─────────────────────────────────────────────────────────── */
@@ -136,10 +142,10 @@ const DEFAULT_FEATURES = {
 
 const DEFAULT_TUNING = {
   enabled: false,
-  method: "random" as "random" | "grid",
+  method: "random" as TuneMethod,
   n_iter: 30,
   cv_folds: 5,
-  scoring: "neg_mean_absolute_percentage_error" as const,
+  scoring: "neg_mean_absolute_percentage_error" as TuneScoring,
 };
 
 /* ─── Page ────────────────────────────────────────────────────────────── */
@@ -153,7 +159,7 @@ export default function TrainingPage() {
   const [tuning, setTuning] = useState({ ...DEFAULT_TUNING });
 
   const [training, setTraining] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<TrainResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Training data coverage
@@ -167,36 +173,50 @@ export default function TrainingPage() {
   const [coverageLoading, setCoverageLoading] = useState(false);
 
   // Enrichment status
-  const [enrichStatus, setEnrichStatus] = useState<{
-    unenriched_rows: number;
-    date_range: { earliest: string | null; latest: string | null } | null;
-    note: string;
-  } | null>(null);
-  const [enrichLoading, setEnrichLoading] = useState(false);
+  const [enrichStatus, setEnrichStatus] = useState<EnrichStatus | null>(null);
   const [enrichRunning, setEnrichRunning] = useState(false);
-  const [enrichResult, setEnrichResult] = useState<{
-    updated: number;
-    skipped: number;
-    errors: number;
-  } | null>(null);
+  const [enrichMessage, setEnrichMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const unmounted = useRef(false);
 
   useEffect(() => {
     getEnrichStatus()
       .then(setEnrichStatus)
       .catch(() => setEnrichStatus(null));
+    return () => {
+      unmounted.current = true;
+    };
   }, []);
 
   const handleEnrich = async () => {
     setEnrichRunning(true);
-    setEnrichResult(null);
+    setEnrichMessage(null);
     try {
-      const r = await triggerEnrich({ overwrite: false });
-      setEnrichResult(r.weather);
-      // refresh status after enrichment
-      const s = await getEnrichStatus();
-      setEnrichStatus(s);
-    } catch {
-      // silently leave result null
+      const before = (await getEnrichStatus()).unenriched_rows;
+      await triggerEnrich({ overwrite: false });
+      // Enrichment runs server-side in the background. Poll the backlog until it
+      // empties or stops shrinking, for at most two minutes.
+      let last = before;
+      let stable = 0;
+      for (let i = 0; i < 40 && !unmounted.current; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const s = await getEnrichStatus();
+        setEnrichStatus(s);
+        if (s.unenriched_rows === 0) break;
+        stable = s.unenriched_rows === last && last < before ? stable + 1 : 0;
+        if (stable >= 2) break;
+        last = s.unenriched_rows;
+      }
+      const after = (await getEnrichStatus()).unenriched_rows;
+      setEnrichMessage(
+        after < before
+          ? { ok: true, text: `Enriched ${(before - after).toLocaleString()} rows.` }
+          : {
+              ok: true,
+              text: "Enrichment is still running in the background. Check back shortly.",
+            },
+      );
+    } catch (e) {
+      setEnrichMessage({ ok: false, text: errorMessage(e, "Enrichment failed.") });
     }
     setEnrichRunning(false);
   };
@@ -265,66 +285,71 @@ export default function TrainingPage() {
     try {
       const r = await trainModel(config);
       setResult(r);
-    } catch (e: any) {
-      setError(e.response?.data?.detail || "Training failed");
+    } catch (e) {
+      setError(errorMessage(e, "Training failed."));
     }
     setTraining(false);
   };
 
   return (
-    <div className="max-w-[1100px] mx-auto flex flex-col gap-4">
-      {/* ── Header ── */}
-      <div className="flex items-center justify-between card py-3">
-        <div>
-          <p className="text-sm font-bold text-gray-800">Model Training</p>
-          <p className="text-[11px] text-gray-500 mt-0.5">
-            Train the HistGradientBoosting price forecasting model for DAM / RTM
-            / TAM
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 rounded-md overflow-hidden border border-[var(--border)]">
-            {SEGMENTS.map((s) => (
-              <button
-                key={s}
-                onClick={() => setSegment(s)}
-                className={`px-3 text-xs font-semibold transition-colors ${
-                  segment === s
-                    ? "bg-[#006DAE] text-white"
-                    : "bg-white text-gray-500 hover:text-gray-700"
-                }`}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={handleTrain}
-            disabled={training}
-            className="btn-primary text-xs h-8 !py-0 px-4"
-          >
-            {training ? "Training…" : `Train ${segment} Model`}
-          </button>
-        </div>
-      </div>
+    <div className="flex flex-col gap-4">
+      <PageHeader
+        title="Model Training"
+        description="Train the gradient-boosted price forecasting model for each market segment"
+        actions={
+          <>
+            <div className="flex h-9 rounded-lg overflow-hidden border border-[var(--border)] bg-white">
+              {SEGMENTS.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setSegment(s)}
+                  aria-pressed={segment === s}
+                  className={`px-3 text-xs font-semibold transition-colors ${
+                    segment === s
+                      ? "bg-[#006DAE] text-white"
+                      : "bg-white text-gray-500 hover:text-gray-700"
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={handleTrain}
+              disabled={training}
+              className="btn-primary h-9 !py-0 disabled:opacity-60"
+            >
+              {training ? "Training…" : `Train ${segment} Model`}
+            </button>
+          </>
+        }
+      />
 
       {/* ── Result / error banners ── */}
       {result && (
         <div className="card bg-teal-50 border-teal-200 py-2">
           <p className="text-teal-700 text-xs font-medium">
-            ✓ Model trained — MAPE:{" "}
-            <span className="font-mono">{result.metrics?.mape}%</span>
-            {" · "}Train samples:{" "}
-            <span className="font-mono">
-              {result.metrics?.train_size?.toLocaleString()}
-            </span>
-            {" · "}Test samples:{" "}
-            <span className="font-mono">
-              {result.metrics?.test_size?.toLocaleString()}
-            </span>
-            {result.metrics?.best_params && (
-              <> · Best params found via auto-tune</>
+            ✓ Model trained ·{" "}
+            {result.metrics.mape !== null ? (
+              <>
+                MAPE <span className="font-mono">{result.metrics.mape}%</span>
+              </>
+            ) : (
+              <>
+                sMAPE <span className="font-mono">{result.metrics.smape}%</span>
+              </>
             )}
+            {" · "}MAE{" "}
+            <span className="font-mono">₹{result.metrics.mae.toFixed(2)}</span>
+            {" · "}Train samples{" "}
+            <span className="font-mono">
+              {result.metrics.train_size.toLocaleString()}
+            </span>
+            {" · "}Test samples{" "}
+            <span className="font-mono">
+              {result.metrics.test_size.toLocaleString()}
+            </span>
+            {result.metrics.best_params && <> · Hyperparameters auto-tuned</>}
           </p>
         </div>
       )}
@@ -374,7 +399,7 @@ export default function TrainingPage() {
                     {
                       label: "Using",
                       value: `${activeDaysCount} days`,
-                      sub: `${activeDates[0]} – ${activeDates[activeDates.length - 1]}`,
+                      sub: `${activeDates[0]} - ${activeDates[activeDates.length - 1]}`,
                       color: "text-gray-700",
                     },
                     {
@@ -453,7 +478,7 @@ export default function TrainingPage() {
                   <p className="text-[10px] text-gray-400 leading-tight">
                     {shuffle ? (
                       <span className="text-amber-500">
-                        ⚠ Shuffle on — temporal order lost
+                        ⚠ Shuffle on: temporal order is lost
                       </span>
                     ) : (
                       "Temporal order preserved"
@@ -544,7 +569,7 @@ export default function TrainingPage() {
           min={2}
           max={30}
           step={1}
-          tooltip="Maximum depth of each decision tree. Deeper trees capture more complex patterns but are prone to overfitting. Typical sweet spot: 4–12."
+          tooltip="Maximum depth of each decision tree. Deeper trees capture more complex patterns but are prone to overfitting. Typical sweet spot: 4-12."
         />
         <NumInput
           label="Learning Rate"
@@ -650,11 +675,11 @@ export default function TrainingPage() {
         ) : (
           <p className="text-xs text-gray-400">Checking enrichment status…</p>
         )}
-        {enrichResult && (
-          <p className="mt-2 text-xs text-green-700">
-            Done — updated {enrichResult.updated.toLocaleString()}, skipped{" "}
-            {enrichResult.skipped.toLocaleString()}, errors{" "}
-            {enrichResult.errors}
+        {enrichMessage && (
+          <p
+            className={`mt-2 text-xs ${enrichMessage.ok ? "text-green-700" : "text-red-600"}`}
+          >
+            {enrichMessage.text}
           </p>
         )}
         <p className="mt-2 text-[10px] text-gray-400">
@@ -806,7 +831,7 @@ export default function TrainingPage() {
             className="select-field text-xs py-1"
             value={tuning.method}
             onChange={(e) =>
-              setTuning((p) => ({ ...p, method: e.target.value as any }))
+              setTuning((p) => ({ ...p, method: e.target.value as TuneMethod }))
             }
           >
             <option value="random">Random Search</option>
@@ -839,7 +864,7 @@ export default function TrainingPage() {
             className="select-field text-xs py-1"
             value={tuning.scoring}
             onChange={(e) =>
-              setTuning((p) => ({ ...p, scoring: e.target.value as any }))
+              setTuning((p) => ({ ...p, scoring: e.target.value as TuneScoring }))
             }
           >
             <option value="neg_mean_absolute_percentage_error">MAPE</option>

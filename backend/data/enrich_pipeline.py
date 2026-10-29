@@ -2,8 +2,8 @@
 Unified feature enrichment pipeline.
 
 Orchestrates all non-IEX data sources:
-  1. Open-Meteo weather  — temperature, wind speed, solar radiation, cloud cover
-  2. India public holidays — computed in-memory from the `holidays` package
+  1. Open-Meteo weather  - temperature, wind speed, solar radiation, cloud cover
+  2. India public holidays - computed in-memory from the `holidays` package
      (no external API, purely deterministic), returned as helper functions
      used by model._build_features().
 
@@ -21,9 +21,8 @@ Holiday coverage (holidays.India()):
 import bisect
 import logging
 import sqlite3
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -34,27 +33,46 @@ logger = logging.getLogger(__name__)
 
 # ── Embedded India national holiday lookup (no external package needed) ──────
 _INDIA_HOLIDAYS_FIXED: dict[str, str] = {
-    "2024-01-26": "Republic Day", "2024-03-25": "Holi",
-    "2024-03-29": "Good Friday",  "2024-04-14": "Dr Ambedkar Jayanti",
-    "2024-08-15": "Independence Day", "2024-10-02": "Gandhi Jayanti",
-    "2024-11-01": "Diwali",       "2024-11-15": "Guru Nanak Jayanti",
+    "2024-01-26": "Republic Day",
+    "2024-03-25": "Holi",
+    "2024-03-29": "Good Friday",
+    "2024-04-14": "Dr Ambedkar Jayanti",
+    "2024-08-15": "Independence Day",
+    "2024-10-02": "Gandhi Jayanti",
+    "2024-11-01": "Diwali",
+    "2024-11-15": "Guru Nanak Jayanti",
     "2024-12-25": "Christmas",
-    "2025-01-01": "New Year",     "2025-01-26": "Republic Day",
-    "2025-03-14": "Holi",         "2025-04-14": "Dr Ambedkar Jayanti",
-    "2025-04-18": "Good Friday",  "2025-08-15": "Independence Day",
-    "2025-10-02": "Gandhi Jayanti", "2025-10-20": "Diwali",
-    "2025-11-05": "Guru Nanak Jayanti", "2025-12-25": "Christmas",
-    "2026-01-01": "New Year",     "2026-01-26": "Republic Day",
-    "2026-03-03": "Holi",         "2026-04-03": "Good Friday",
-    "2026-04-14": "Dr Ambedkar Jayanti", "2026-08-15": "Independence Day",
-    "2026-10-02": "Gandhi Jayanti", "2026-10-19": "Dussehra",
-    "2026-11-08": "Diwali",       "2026-11-24": "Guru Nanak Jayanti",
+    "2025-01-01": "New Year",
+    "2025-01-26": "Republic Day",
+    "2025-03-14": "Holi",
+    "2025-04-14": "Dr Ambedkar Jayanti",
+    "2025-04-18": "Good Friday",
+    "2025-08-15": "Independence Day",
+    "2025-10-02": "Gandhi Jayanti",
+    "2025-10-20": "Diwali",
+    "2025-11-05": "Guru Nanak Jayanti",
+    "2025-12-25": "Christmas",
+    "2026-01-01": "New Year",
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr Ambedkar Jayanti",
+    "2026-08-15": "Independence Day",
+    "2026-10-02": "Gandhi Jayanti",
+    "2026-10-19": "Dussehra",
+    "2026-11-08": "Diwali",
+    "2026-11-24": "Guru Nanak Jayanti",
     "2026-12-25": "Christmas",
-    "2027-01-01": "New Year",     "2027-01-26": "Republic Day",
-    "2027-03-22": "Holi",         "2027-03-26": "Good Friday",
-    "2027-04-14": "Dr Ambedkar Jayanti", "2027-08-15": "Independence Day",
-    "2027-10-02": "Gandhi Jayanti", "2027-10-08": "Dussehra",
-    "2027-10-29": "Diwali",       "2027-11-14": "Guru Nanak Jayanti",
+    "2027-01-01": "New Year",
+    "2027-01-26": "Republic Day",
+    "2027-03-22": "Holi",
+    "2027-03-26": "Good Friday",
+    "2027-04-14": "Dr Ambedkar Jayanti",
+    "2027-08-15": "Independence Day",
+    "2027-10-02": "Gandhi Jayanti",
+    "2027-10-08": "Dussehra",
+    "2027-10-29": "Diwali",
+    "2027-11-14": "Guru Nanak Jayanti",
     "2027-12-25": "Christmas",
 }
 
@@ -63,6 +81,7 @@ def _build_india_holiday_set(year_min: int, year_max: int) -> list[date]:
     """Return sorted list of Indian national holiday dates for [year_min, year_max+1]."""
     try:
         import holidays as holidays_lib
+
         h = holidays_lib.India(years=range(year_min, year_max + 2))
         return sorted(h.keys())
     except ImportError:
@@ -81,7 +100,7 @@ def compute_holiday_features(
     """
     Given a pandas Series of date-like values (strings or date objects),
     return two Series aligned to the same index:
-      is_holiday     : int  0/1 — is this date an Indian national holiday?
+      is_holiday     : int  0/1 - is this date an Indian national holiday?
       days_to_holiday: int  signed days to nearest holiday, clamped to [-7, +7]
                             negative = holiday was N days ago
                             positive = holiday is N days ahead
@@ -118,21 +137,25 @@ def compute_holiday_features(
             return 7
         return min(candidates, key=abs)
 
-    is_holiday     = pd.Series([int(d in holiday_set) for d in dates], index=dates_series.index)
-    days_to_holiday = pd.Series([_days_to_nearest(d) for d in dates], index=dates_series.index).clip(-7, 7)
+    is_holiday = pd.Series([int(d in holiday_set) for d in dates], index=dates_series.index)
+    days_to_holiday = pd.Series(
+        [_days_to_nearest(d) for d in dates], index=dates_series.index
+    ).clip(-7, 7)
 
     return is_holiday, days_to_holiday
 
 
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 
-def get_unenriched_date_range(db_path: Path) -> tuple[Optional[str], Optional[str]]:
+
+def get_unenriched_date_range(db_path: Path) -> tuple[str | None, str | None]:
     """
     Return (start_date, end_date) of price_history rows that are missing
     weather data (wind_speed_ms IS NULL).
     Returns (None, None) if all rows are enriched or table is empty.
     """
     from data.scrape_weather import ensure_weather_columns
+
     ensure_weather_columns(db_path)
 
     conn = sqlite3.connect(db_path, timeout=30)
@@ -159,10 +182,10 @@ def unenriched_row_count(db_path: Path) -> int:
 
 def run_enrichment(
     db_path: Path,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     overwrite: bool = False,
-    lat: float = 28.67,   # Delhi NCR
+    lat: float = 28.67,  # Delhi NCR
     lon: float = 77.22,
 ) -> dict:
     """
@@ -192,7 +215,7 @@ def run_enrichment(
                 "weather": {"updated": 0, "skipped": 0, "errors": []},
             }
         start_date = start_date or auto_start
-        end_date   = end_date   or min(auto_end, date.today().isoformat())
+        end_date = end_date or min(auto_end, date.today().isoformat())
 
     logger.info("Enrichment pipeline: weather for %s → %s", start_date, end_date)
 

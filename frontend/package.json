@@ -1,12 +1,13 @@
 {
-  "name": "power-trading-platform",
+  "name": "energytrader-web",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint --max-warnings 0",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "next": "^14.2.0",

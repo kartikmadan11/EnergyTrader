@@ -1,39 +1,14 @@
-# CERC Draft DSM Regulations 2024
-# Central Electricity Regulatory Commission
-# Deviation Settlement Mechanism — 2024 Draft tightening
-#
-# Reference: Draft CERC (DSM and Related Matters) Regulations 2024
-# https://cer.iitk.ac.in/odf_assets/upload_files/blog/Draft_CERC_DSM_and_related_matters_Regulations_2024.pdf
-#
-# Key changes vs. 2019:
-#   - Permissible deviation band reduced from ±10% → ±7%
-#   - Base penalty rate increased from 1.5x → 2.0x
-#   - New severe-deviation surcharge: deviations >15% attract an additional 1.5x multiplier
-#   - Market coupling (effective Jan 2026) converges DAM prices across all exchanges
-#   - Stronger compliance incentive driving need for tighter LP constraint modelling
-
 regulation_id: cerc_dsm_2024_draft
-name: "CERC DSM 2024 (Draft)"
-description: >
-  Draft CERC DSM Regulations 2024. Reduces the permissible deviation band to ±7%,
-  raises the base penalty multiplier to 2.0x, and introduces a severe-deviation
-  surcharge of 1.5x for deviations exceeding ±15%. Aligned with grid stability
-  requirements of India's 500 GW renewable integration target.
-effective_date: "2024-01-01"
-status: "draft"
-
-# ── Price limits (INR/kWh) ──────────────────────────────────────────────
+name: CERC DSM 2024 (Draft)
+description: Draft CERC (Deviation Settlement Mechanism and Related Matters) Regulations, 2024. Narrows
+  the permissible deviation band to ±7%, raises the penalty rate to 2.0x and adds a 1.5x surcharge on
+  deviation beyond ±15% of schedule.
+effective_date: '2024-01-01'
+status: draft
 price_floor: 0.0
 price_ceiling: 12.0
-
-# ── Deviation band ──────────────────────────────────────────────────────
-deviation_band: 0.07 # ±7% permissible deviation (tightened from 10%)
-
-# ── Penalty structure ───────────────────────────────────────────────────
-penalty_rate: 2.0 # base multiplier on energy charge for excess deviation
-severe_deviation_threshold: 0.15 # >15% deviation triggers additional surcharge
-severe_penalty_multiplier: 1.5 # surcharge applied ON TOP of base penalty_rate
-
-# ── Market minimums ─────────────────────────────────────────────────────
+deviation_band: 0.07
+penalty_rate: 2.0
+severe_deviation_threshold: 0.15
+severe_penalty_multiplier: 1.5
 technical_minimum_mw: 1.0
-

@@ -5,7 +5,36 @@ const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+/**
+ * Human-readable message for a failed request.
+ *
+ * FastAPI returns `detail` as a string, a Pydantic validation array of
+ * `{loc, msg}` objects, or (for blocked submissions) an object with `message`.
+ */
+export function errorMessage(e: unknown, fallback: string): string {
+  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response
+    ?.data?.detail;
+  if (!detail) return fallback;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail))
+    return detail
+      .map(
+        (d: { loc?: (string | number)[]; msg?: string }) =>
+          `${d.loc?.slice(-1)[0] ?? "field"}: ${d.msg}`,
+      )
+      .join(" · ");
+  if (typeof detail === "object" && "message" in detail)
+    return String((detail as { message: unknown }).message);
+  return fallback;
+}
+
 // ---- Forecast ----
+export type TuneMethod = "grid" | "random";
+export type TuneScoring =
+  | "neg_mean_absolute_percentage_error"
+  | "neg_mean_squared_error"
+  | "r2";
+
 export interface TrainConfig {
   segment: string;
   test_size?: number;
@@ -24,14 +53,11 @@ export interface TrainConfig {
     validation_fraction?: number;
   };
   tuning?: {
-    method?: "grid" | "random";
+    method?: TuneMethod;
     n_iter?: number;
     cv_folds?: number;
-    scoring?:
-      | "neg_mean_absolute_percentage_error"
-      | "neg_mean_squared_error"
-      | "r2";
-    param_grid?: Record<string, any> | null;
+    scoring?: TuneScoring;
+    param_grid?: Record<string, unknown[]> | null;
   } | null;
   features?: {
     extra_lags?: number[];
@@ -48,9 +74,47 @@ export interface TrainConfig {
   };
 }
 
-export async function trainModel(config: TrainConfig) {
+export interface TrainMetrics {
+  /** Null when every test price is below the ₹1/kWh MAPE floor. */
+  mape: number | null;
+  smape: number;
+  rmse: number;
+  mae: number;
+  r2: number;
+  train_size: number;
+  test_size: number;
+  n_features: number;
+  feature_names: string[];
+  top_features: { feature: string; importance: number }[];
+  block_smape_worst_5: Record<string, number>;
+  best_params?: Record<string, unknown>;
+  cv_results?: unknown;
+}
+
+export interface TrainResult {
+  status: "trained";
+  segment: string;
+  metrics: TrainMetrics;
+}
+
+export async function trainModel(config: TrainConfig): Promise<TrainResult> {
   const res = await api.post("/forecast/train", config);
   return res.data;
+}
+
+export interface ForecastBlock {
+  block: number;
+  predicted_price: number;
+  confidence_low: number;
+  confidence_high: number;
+  volatility: number;
+  top_features: { feature: string; importance: number }[];
+}
+
+export interface ForecastResponse {
+  target_date: string;
+  segment: string;
+  blocks: ForecastBlock[];
 }
 
 export async function predictPrices(
@@ -58,7 +122,7 @@ export async function predictPrices(
   segment: string,
   blockStart = 1,
   blockEnd = 96,
-) {
+): Promise<ForecastResponse> {
   const res = await api.get("/forecast/predict", {
     params: {
       target_date: targetDate,
@@ -70,26 +134,39 @@ export async function predictPrices(
   return res.data;
 }
 
-export async function predictPricesRange(
-  dateFrom: string,
-  dateTo: string,
-  segment: string,
-  blockStart = 1,
-  blockEnd = 96,
-) {
-  const res = await api.get("/forecast/predict-range", {
-    params: {
-      date_from: dateFrom,
-      date_to: dateTo,
-      segment,
-      block_start: blockStart,
-      block_end: blockEnd,
-    },
-  });
-  return res.data;
+// ---- Bids ----
+/** One block of a bid set as accepted by validate, risk, approval and submit. */
+export interface BidItem {
+  block: number;
+  segment: string;
+  price: number;
+  volume_mw: number;
+  is_overridden?: boolean;
+  override_reason?: string;
 }
 
-// ---- Bids ----
+export interface ConstraintViolation {
+  block: number;
+  field: string;
+  value: number;
+  limit: number;
+  message: string;
+}
+
+export interface BidRecommendation {
+  block: number;
+  segment: string;
+  price: number;
+  volume_mw: number;
+  strategy: string;
+  dsm_penalty_estimate: number;
+  uncertainty_score: number;
+  constraint_violations: ConstraintViolation[];
+  active_policy: string;
+  effective_lambda1: number;
+  effective_lambda2: number;
+}
+
 export interface BidOptConfig {
   price_offset?: number | null;
   risk_tolerance?: number | null;
@@ -105,7 +182,7 @@ export async function recommendBids(
   segment: string,
   demandMw: number = 500,
   overrides: BidOptConfig = {},
-) {
+): Promise<BidRecommendation[]> {
   const res = await api.get("/bids/recommend", {
     params: {
       target_date: targetDate,
@@ -135,16 +212,41 @@ export async function recommendBids(
   return res.data;
 }
 
+export interface SubmitResult {
+  session_id: string;
+  target_date: string;
+  segment: string;
+  bid_count: number;
+  verdict: ApprovalResult["verdict"];
+  score: number;
+  status: "submitted";
+}
+
+/** Submit a bid set. The server re-runs the pre-trade checks and returns 422 if they block it. */
 export async function submitBids(
   targetDate: string,
   strategy: string,
   segment: string,
-  bids: any[],
-) {
+  bids: BidItem[],
+): Promise<SubmitResult> {
   const res = await api.post("/bids/submit", bids, {
     params: { target_date: targetDate, strategy, segment },
   });
   return res.data;
+}
+
+export interface TuneResult {
+  best_lambda1_base: number;
+  best_lambda2_base: number;
+  /** Total bid value minus twice the estimated DSM penalty, in INR. */
+  best_score: number;
+  grid: {
+    lambda1_base: number;
+    lambda2_base: number;
+    total_bid_value: number;
+    total_dsm_penalty: number;
+    score: number;
+  }[];
 }
 
 export async function autoTuneLambdas(
@@ -152,45 +254,22 @@ export async function autoTuneLambdas(
   strategy: string,
   segment: string,
   demandMw: number = 500,
-) {
+): Promise<TuneResult> {
   const res = await api.get("/bids/tune", {
     params: { target_date: targetDate, strategy, segment, demand_mw: demandMw },
-  });
-  return res.data as {
-    best_lambda1_base: number;
-    best_lambda2_base: number;
-    best_score: number;
-    dsm_multiplier: number;
-    grid: {
-      lambda1_base: number;
-      lambda2_base: number;
-      total_bid_value: number;
-      total_dsm_penalty: number;
-      score: number;
-    }[];
-  };
-}
-
-export async function compareStrategies(
-  targetDate: string,
-  segment: string,
-  demandMw: number = 500,
-) {
-  const res = await api.get("/bids/compare-strategies", {
-    params: { target_date: targetDate, segment, demand_mw: demandMw },
   });
   return res.data;
 }
 
-export async function validateBids(
-  targetDate: string,
-  strategy: string,
-  segment: string,
-  bids: any[],
-) {
-  const res = await api.post("/bids/validate", bids, {
-    params: { target_date: targetDate, strategy, segment },
-  });
+export interface ValidationResult {
+  valid: boolean;
+  violation_count: number;
+  violations: ConstraintViolation[];
+}
+
+/** Check bids against the active policy's price band and technical minimum. */
+export async function validateBids(bids: BidItem[]): Promise<ValidationResult> {
+  const res = await api.post("/bids/validate", bids);
   return res.data;
 }
 
@@ -220,7 +299,7 @@ export async function requestApproval(
   targetDate: string,
   segment: string,
   strategy: string,
-  bids: any[],
+  bids: BidItem[],
 ): Promise<ApprovalResult> {
   const res = await api.post("/bids/request-approval", bids, {
     params: {
@@ -234,44 +313,127 @@ export async function requestApproval(
 }
 
 // ---- Risk ----
+export interface RiskResult {
+  segment: string;
+  var_95: number;
+  expected_dsm_penalty: number;
+  worst_case_penalty: number;
+  total_exposure: number;
+  alert_triggered: boolean;
+  alert_details: { message: string; [key: string]: unknown } | null;
+  var_threshold: number;
+  /** Bids that had a stored forecast for their block. */
+  forecast_coverage: number;
+  policy_id: string;
+}
+
 export async function assessRisk(
   sessionId: string,
+  targetDate: string,
   segment: string,
-  bids: any[],
+  bids: BidItem[],
   varThreshold?: number,
-) {
-  const params: Record<string, unknown> = { session_id: sessionId, segment };
+): Promise<RiskResult> {
+  const params: Record<string, unknown> = {
+    session_id: sessionId,
+    target_date: targetDate,
+    segment,
+  };
   if (varThreshold !== undefined) params.var_threshold = varThreshold;
   const res = await api.post("/risk/assess", bids, { params });
   return res.data;
 }
 
 // ---- Audit ----
-export async function getAuditLog(sessionId?: string, limit: number = 100) {
-  const params: any = { limit };
+export interface AuditEntry {
+  id: number;
+  timestamp: string | null;
+  session_id: string | null;
+  user: string | null;
+  action: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  details: Record<string, unknown> | null;
+}
+
+export async function getAuditLog(
+  sessionId?: string,
+  limit: number = 100,
+): Promise<AuditEntry[]> {
+  const params: Record<string, unknown> = { limit };
   if (sessionId) params.session_id = sessionId;
   const res = await api.get("/audit/log", { params });
   return res.data;
+}
+
+export interface PostMarketBlock {
+  block: number;
+  predicted_price: number | null;
+  actual_price: number;
+  bid_price: number | null;
+  bid_volume: number | null;
+  cleared: boolean;
+  error: number | null;
+  error_pct: number | null;
+}
+
+export interface PostMarketSummary {
+  target_date: string;
+  segment: string;
+  /** Submitted bid session that was analyzed, if any. */
+  session_id: string | null;
+  blocks: PostMarketBlock[];
+  /** MAPE over blocks priced at or above the metrics floor; null when none qualify. */
+  mape: number | null;
+  /** MAE over blocks with a stored forecast; null when there are none. */
+  mae: number | null;
+  bid_hit_rate: number;
+  basket_rate: number;
+  baseline_basket_rate: number;
+  basket_rate_change_pct: number;
+  uncleared_dsm_exposure: number;
 }
 
 export async function postMarketAnalysis(
   targetDate: string,
   segment: string,
   sessionId?: string,
-) {
-  const params: any = { target_date: targetDate, segment };
+): Promise<PostMarketSummary> {
+  const params: Record<string, unknown> = { target_date: targetDate, segment };
   if (sessionId) params.session_id = sessionId;
   const res = await api.get("/audit/post-market", { params });
   return res.data;
 }
 
 // ---- Health / Fallback ----
-export async function getHealth() {
+/** API liveness probe. */
+export async function pingApi(): Promise<boolean> {
+  try {
+    const res = await api.get("/health", { timeout: 5000 });
+    return res.data?.status === "ok";
+  } catch {
+    return false;
+  }
+}
+
+export interface SegmentHealth {
+  latest_data: string | null;
+  row_count: number;
+  latest_forecast: string | null;
+}
+
+export interface DataHealth {
+  status: "ok";
+  segments: Record<"DAM" | "RTM" | "TAM", SegmentHealth>;
+}
+
+/** Per-segment data freshness. */
+export async function getHealth(): Promise<DataHealth> {
   const res = await api.get("/forecast/health");
   return res.data;
 }
 
-export async function getLatestForecast(segment: string) {
+export async function getLatestForecast(segment: string): Promise<ForecastResponse> {
   const res = await api.get("/forecast/latest", { params: { segment } });
   return res.data;
 }
@@ -286,35 +448,55 @@ export async function getDataCoverage(segment: string) {
   return res.data as { segment: string; dates: string[] };
 }
 
+export interface BacktestBlock {
+  block: number;
+  predicted: number;
+  actual: number;
+  /** Absolute percentage error; null when the actual price is below the MAPE floor. */
+  error_pct: number | null;
+}
+
+export interface BacktestDay {
+  date: string;
+  /** Where the date sat relative to the model's training data. */
+  data_split: "train" | "test" | "unseen";
+  mape: number | null;
+  smape: number;
+  mae: number;
+  rmse: number;
+  avg_predicted: number;
+  avg_actual: number;
+  blocks: BacktestBlock[];
+}
+
+export interface BacktestResult {
+  segment: string;
+  start_date: string;
+  end_date: string;
+  days_evaluated: number;
+  aggregate: { mape: number | null; smape: number; mae: number; rmse: number; r2: number };
+  best_day: { date: string; mape: number | null; smape: number };
+  worst_day: { date: string; mape: number | null; smape: number };
+  daily: BacktestDay[];
+}
+
+/** Walk-forward backtest: each date is forecast from history before it only. */
 export async function evaluateForecast(
   startDate: string,
   endDate: string,
   segment: string,
-) {
+): Promise<BacktestResult> {
   const res = await api.get("/forecast/evaluate", {
     params: { start_date: startDate, end_date: endDate, segment },
   });
   return res.data;
 }
 
-export async function exportForecastCsv(segment: string) {
-  const res = await api.get("/forecast/export-csv", {
-    params: { segment },
-    responseType: "blob",
+/** Scrape one segment for an inclusive date range of up to 30 days. */
+export async function triggerScrape(segment: string, startDate: string, endDate: string) {
+  const res = await api.post("/scraper/trigger", null, {
+    params: { segment, start_date: startDate, end_date: endDate },
   });
-  return res.data;
-}
-
-export async function triggerScrape(
-  segment: string,
-  days: number = 3,
-  startDate?: string,
-  endDate?: string,
-) {
-  const params: Record<string, string | number> = { segment, days };
-  if (startDate) params.start_date = startDate;
-  if (endDate) params.end_date = endDate;
-  const res = await api.post("/scraper/trigger", null, { params });
   return res.data as {
     status: string;
     segment: string;
@@ -327,27 +509,10 @@ export async function triggerScrape(
   };
 }
 
-export async function triggerScrapeAll(days: number = 3) {
-  const res = await api.post("/scraper/trigger-all", null, {
-    params: { days },
-  });
-  return res.data as {
-    start_date: string;
-    end_date: string;
-    segments: Record<
-      string,
-      {
-        status: string;
-        scraped: number;
-        inserted: number;
-        dates_with_data: string[];
-        errors: string[];
-      }
-    >;
-  };
-}
-
 // ---- DSM Policy ----
+/** Window event fired after a policy is activated or edited, so other views can refresh. */
+export const POLICY_CHANGED_EVENT = "energytrader:policy-changed";
+
 export interface DSMPolicy {
   regulation_id: string;
   name: string;
@@ -370,7 +535,7 @@ export interface PolicyDiff {
   policy_a_value: number;
   policy_b_value: number;
   pct_change: number | null;
-  direction: string;
+  direction: "stricter" | "looser";
 }
 
 export interface PolicyComparison {
@@ -415,30 +580,19 @@ export async function updatePolicy(
   return res.data;
 }
 
-export async function getScrapeStatus() {
-  const res = await api.get("/scraper/status");
-  return res.data as {
-    segments: Record<
-      string,
-      {
-        latest_date: string | null;
-        earliest_date: string | null;
-        row_count: number;
-      }
-    >;
-  };
-}
-
 // ---- Enrichment (weather + holidays) ----
-export async function getEnrichStatus() {
-  const res = await api.get("/scraper/enrich/status");
-  return res.data as {
-    unenriched_rows: number;
-    date_range: { earliest: string | null; latest: string | null } | null;
-    note: string;
-  };
+export interface EnrichStatus {
+  /** Price history rows still missing weather features. */
+  unenriched_rows: number;
+  date_range: { earliest: string | null; latest: string | null };
 }
 
+export async function getEnrichStatus(): Promise<EnrichStatus> {
+  const res = await api.get("/scraper/enrich/status");
+  return res.data;
+}
+
+/** Start weather enrichment in the background; poll `getEnrichStatus` for progress. */
 export async function triggerEnrich(params?: {
   start_date?: string;
   end_date?: string;
@@ -446,167 +600,8 @@ export async function triggerEnrich(params?: {
 }) {
   const res = await api.post("/scraper/enrich", null, { params });
   return res.data as {
-    status: string;
-    start_date: string;
-    end_date: string;
-    weather: { updated: number; skipped: number; errors: number };
-  };
-}
-
-// ---- Beckn Protocol / UEI ----
-
-export interface BecknExchangeQuote {
-  exchange_id: string;
-  exchange_name: string;
-  transaction_id: string;
-  segment: string;
-  target_date: string;
-  block_start: number;
-  block_end: number;
-  items: {
-    block: number;
-    time: string;
-    price_inr_kwh: number;
-    volume_mw: number;
-    confidence_low: number;
-    confidence_high: number;
-  }[];
-  avg_price: number;
-  total_volume_mw: number;
-  total_value_inr: number;
-}
-
-export interface BecknSearchResponse {
-  transaction_id: string;
-  providers: BecknExchangeQuote[];
-  search_params: {
-    segment: string;
-    target_date: string;
-    block_start: number;
-    block_end: number;
-    demand_mw: number;
-  };
-}
-
-export interface BecknOrder {
-  order_id: string;
-  transaction_id: string;
-  status: "draft" | "confirmed";
-  exchange_id: string;
-  segment: string;
-  target_date: string;
-  block_start: number;
-  block_end: number;
-  demand_mw: number;
-  items: BecknExchangeQuote["items"];
-  total_volume_mw: number;
-  total_value_inr: number;
-  avg_price: number;
-  created_at: string;
-  confirmed_at: string | null;
-  billing_entity: string;
-}
-
-export async function becknSearch(
-  segment: string,
-  targetDate: string,
-  blockStart = 1,
-  blockEnd = 96,
-  demandMw = 500,
-): Promise<BecknSearchResponse> {
-  const res = await api.post("/beckn/search", {
-    segment,
-    target_date: targetDate,
-    block_start: blockStart,
-    block_end: blockEnd,
-    demand_mw: demandMw,
-  });
-  return res.data;
-}
-
-export async function becknSelect(
-  transactionId: string,
-  exchangeId: string,
-  segment: string,
-  targetDate: string,
-  blockStart: number,
-  blockEnd: number,
-  demandMw: number,
-) {
-  const res = await api.post("/beckn/select", {
-    transaction_id: transactionId,
-    exchange_id: exchangeId,
-    segment,
-    target_date: targetDate,
-    block_start: blockStart,
-    block_end: blockEnd,
-    demand_mw: demandMw,
-  });
-  return res.data as { transaction_id: string; quote: BecknExchangeQuote; beckn_quote: Record<string, unknown> };
-}
-
-export async function becknInit(
-  transactionId: string,
-  exchangeId: string,
-  segment: string,
-  targetDate: string,
-  blockStart: number,
-  blockEnd: number,
-  demandMw: number,
-  billingEntity = "DISCOM-Default",
-) {
-  const res = await api.post("/beckn/init", {
-    transaction_id: transactionId,
-    exchange_id: exchangeId,
-    segment,
-    target_date: targetDate,
-    block_start: blockStart,
-    block_end: blockEnd,
-    demand_mw: demandMw,
-    billing_entity: billingEntity,
-  });
-  return res.data as {
-    transaction_id: string;
-    order_id: string;
-    status: string;
-    exchange_id: string;
-    items: BecknExchangeQuote["items"];
-    total_volume_mw: number;
-    total_value_inr: number;
-    fulfillment: Record<string, unknown>;
-  };
-}
-
-export async function becknConfirm(orderId: string, transactionId: string) {
-  const res = await api.post("/beckn/confirm", {
-    order_id: orderId,
-    transaction_id: transactionId,
-  });
-  return res.data as {
-    order_id: string;
-    status: string;
-    message: string;
-    exchange_id: string;
-    segment: string;
-    target_date: string;
-  };
-}
-
-export async function becknListOrders(): Promise<{ orders: BecknOrder[]; total: number }> {
-  const res = await api.get("/beckn/orders");
-  return res.data;
-}
-
-export async function becknListExchanges() {
-  const res = await api.get("/beckn/exchanges");
-  return res.data as {
-    exchanges: {
-      id: string;
-      name: string;
-      price_premium_pct: number;
-      bpp_uri: string;
-      description: string;
-    }[];
+    status: "started";
+    params: { start_date: string | null; end_date: string | null; overwrite: boolean };
   };
 }
 

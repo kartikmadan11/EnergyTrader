@@ -6,25 +6,23 @@ Discovered API: https://www.iexindia.com/api/v1/{segment}/market-snapshot
   - toDate / fromDate: DD-MM-YYYY format
   - Returns JSON: {statusCode, message, data: [{date, period, purchase_bid, sell_bid, mcv, final_scheduled_volume, mcp, congestion}]}
 
-Usage:
-    cd /path/to/makeathon-20
-    source .venv/bin/activate
-    python -m backend.data.scrape_iex --start 2025-01-01 --end 2026-03-30
+Usage (from backend/):
+    uv run python -m data.scrape_iex --start 2025-01-01 --end 2026-03-30
 """
 
 import argparse
+import logging
 import sqlite3
 import time
-import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 
-warnings.filterwarnings("ignore", message="Unverified HTTPS")
+from common.config import DB_PATH
+from common.http import requests_session
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "data" / "platform.db"
+logger = logging.getLogger(__name__)
 
 API_BASE = "https://www.iexindia.com/api/v1"
 
@@ -33,14 +31,7 @@ SEGMENT_ENDPOINTS = {
     "RTM": f"{API_BASE}/rtm/market-snapshot",
 }
 
-SESSION = requests.Session()
-SESSION.verify = False
-SESSION.headers.update(
-    {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-        "Content-Type": "application/json",
-    }
-)
+SESSION = requests_session({"Content-Type": "application/json"})
 
 
 def to_ddmmyyyy(iso_date: str) -> str:
@@ -143,13 +134,13 @@ def scrape_date(date_str: str, segments: list[str], db_path: Path) -> dict:
                 rows = records_to_rows(records, date_str, seg)
                 count = store_rows(rows, db_path)
                 results[seg] = {"scraped": len(rows), "inserted": count}
-                print(f"  {seg}: {len(rows)} blocks, {count} new rows inserted")
+                logger.info("%s %s: %d blocks, %d new rows", seg, date_str, len(rows), count)
             else:
                 results[seg] = {"scraped": 0, "inserted": 0}
-                print(f"  {seg}: No data found")
+                logger.info("%s %s: no data", seg, date_str)
         except requests.RequestException as e:
-            results[seg] = {"error": str(e)}
-            print(f"  {seg}: HTTP error - {e}")
+            results[seg] = {"scraped": 0, "inserted": 0, "error": str(e)}
+            logger.warning("%s %s: HTTP error: %s", seg, date_str, e)
     return results
 
 
@@ -162,39 +153,30 @@ def date_range(start: str, end: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Scrape IEX India market data via REST API"
-    )
+    parser = argparse.ArgumentParser(description="Scrape IEX India market data via REST API")
     parser.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD")
-    parser.add_argument(
-        "--segments", default="DAM,RTM", help="Comma-separated: DAM,RTM"
-    )
+    parser.add_argument("--segments", default="DAM,RTM", help="Comma-separated: DAM,RTM")
     parser.add_argument("--db", default=str(DB_PATH), help="SQLite DB path")
-    parser.add_argument(
-        "--delay", type=float, default=1.0, help="Delay between requests (sec)"
-    )
+    parser.add_argument("--delay", type=float, default=1.0, help="Delay between requests (sec)")
     args = parser.parse_args()
 
     segments = [s.strip().upper() for s in args.segments.split(",")]
     db_path = Path(args.db)
     dates = list(date_range(args.start, args.end))
 
-    print(
-        f"Scraping {len(dates)} days x {len(segments)} segments from IEX India REST API"
-    )
-    print(f"Database: {db_path}\n")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logger.info("Scraping %d days x %d segments into %s", len(dates), len(segments), db_path)
 
     total = 0
     for i, d in enumerate(dates):
-        print(f"[{i+1}/{len(dates)}] {d}")
         results = scrape_date(d, segments, db_path)
         for res in results.values():
             total += res.get("inserted", 0)
         if i < len(dates) - 1:
             time.sleep(args.delay)
 
-    print(f"\nDone! Total new rows inserted: {total}")
+    logger.info("Inserted %d new rows", total)
 
 
 if __name__ == "__main__":
