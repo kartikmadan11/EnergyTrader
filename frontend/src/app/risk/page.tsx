@@ -275,7 +275,7 @@ export default function RiskPage() {
                     fontSize: "12px",
                     color: "#1E293B",
                   }}
-                  formatter={(val: number) => formatINR(val)}
+                  formatter={(val) => formatINR(Number(val))}
                 />
                 <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={28}>
                   {riskMetrics.map((entry) => (

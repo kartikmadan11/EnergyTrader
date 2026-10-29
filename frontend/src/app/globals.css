@@ -72,3 +72,9 @@
 .header-gradient {
   background: linear-gradient(90deg, #006DAE 0%, #005A91 60%, #003F6B 100%);
 }
+
+/* Recharts focuses an internal layer when a chart is clicked; only the chart surface itself
+   takes keyboard focus, and it keeps its focus ring. */
+.recharts-wrapper g:focus {
+  outline: none;
+}

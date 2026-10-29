@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import {
   AreaChart,
   Area,
@@ -194,11 +194,9 @@ export default function WorkspacePage() {
 
   // Data
   const [forecastBlocks, setForecastBlocks] = useState<ForecastBlock[]>([]);
-  const forecastRef = useRef<ForecastBlock[]>([]);
   const [bidRows, setBidRows] = useState<BidRow[]>([]);
   const [liveRisk, setLiveRisk] = useState<RiskResult | null>(null);
   const [riskLoading, setRiskLoading] = useState(false);
-  const riskDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Workflow
   const [stage, setStage] = useState<Stage>("idle");
@@ -218,40 +216,46 @@ export default function WorkspacePage() {
   const busy = BUSY_STAGES.includes(stage) || autoTuning;
   const submitted = stage === "submitted";
 
-  // A forecast belongs to one delivery date and segment; changing either starts over.
-  useEffect(() => {
-    forecastRef.current = [];
-    setForecastBlocks([]);
+  const clearBids = () => {
     setBidRows([]);
+    setLiveRisk(null);
+    setRiskLoading(false);
     setSubmitResult(null);
     setValidationResult(null);
     setApprovalResult(null);
+  };
+
+  // A forecast belongs to one delivery date and segment; changing either starts over.
+  const changeMarket = (date: string, seg: string) => {
+    if (date === targetDate && seg === segment) return;
+    setTargetDate(date);
+    setSegment(seg);
+    setForecastBlocks([]);
+    clearBids();
     setTuneScore(null);
     setError("");
     setStage("idle");
-  }, [targetDate, segment]);
+  };
 
   // Bids belong to one strategy; changing it keeps the forecast but drops the bids
   // and any manual lambda overrides.
-  useEffect(() => {
+  const changeStrategy = (next: (typeof STRATEGIES)[number]) => {
+    if (next === strategy) return;
+    setStrategy(next);
     setLambda1(null);
     setLambda2(null);
     setTuneScore(null);
-    setBidRows([]);
-    setSubmitResult(null);
-    setValidationResult(null);
-    setApprovalResult(null);
-    setStage((s) => (forecastRef.current.length > 0 ? "forecasted" : s));
-  }, [strategy]);
+    clearBids();
+    if (forecastBlocks.length > 0) setStage("forecasted");
+  };
 
   // ── Live risk debounce ──────────────────────────────────────────────────
+  // Re-assess 600 ms after the last edit. A newer edit cancels the pending call and
+  // discards any response still in flight for the older bids.
   useEffect(() => {
-    if (bidRows.length === 0) {
-      setLiveRisk(null);
-      return;
-    }
-    if (riskDebounceRef.current) clearTimeout(riskDebounceRef.current);
-    riskDebounceRef.current = setTimeout(async () => {
+    if (bidRows.length === 0) return;
+    let current = true;
+    const timer = setTimeout(async () => {
       setRiskLoading(true);
       try {
         const result = await assessRisk(
@@ -265,14 +269,15 @@ export default function WorkspacePage() {
             volume_mw: b.volume_mw,
           })),
         );
-        setLiveRisk(result);
+        if (current) setLiveRisk(result);
       } catch {
         // Keep the last result; the panel is advisory and refreshes on the next edit.
       }
-      setRiskLoading(false);
+      if (current) setRiskLoading(false);
     }, 600);
     return () => {
-      if (riskDebounceRef.current) clearTimeout(riskDebounceRef.current);
+      current = false;
+      clearTimeout(timer);
     };
   }, [bidRows, segment, targetDate]);
 
@@ -291,14 +296,9 @@ export default function WorkspacePage() {
   const handleForecast = async () => {
     setStage("forecasting");
     setError("");
-    setBidRows([]);
-    setLiveRisk(null);
-    setSubmitResult(null);
-    setValidationResult(null);
-    setApprovalResult(null);
+    clearBids();
     try {
       const data = await predictPrices(targetDate, segment);
-      forecastRef.current = data.blocks;
       setForecastBlocks(data.blocks);
       setStage("forecasted");
     } catch (e) {
@@ -311,7 +311,7 @@ export default function WorkspacePage() {
     l1Override?: number | null,
     l2Override?: number | null,
   ) => {
-    if (forecastRef.current.length === 0) {
+    if (forecastBlocks.length === 0) {
       setError("Generate a forecast first.");
       return;
     }
@@ -337,7 +337,7 @@ export default function WorkspacePage() {
         },
       );
       const merged: BidRow[] = recs.map((r) => {
-        const fc = forecastRef.current.find((f) => f.block === r.block);
+        const fc = forecastBlocks.find((f) => f.block === r.block);
         return {
           ...r,
           predicted_price: fc?.predicted_price ?? r.price,
@@ -614,7 +614,7 @@ export default function WorkspacePage() {
             <input
               type="date"
               value={targetDate}
-              onChange={(e) => e.target.value && setTargetDate(e.target.value)}
+              onChange={(e) => e.target.value && changeMarket(e.target.value, segment)}
               disabled={busy}
               className="w-full px-3 py-2 text-sm border-2 border-gray-300 rounded-lg focus:outline-none focus:border-[#006DAE] focus:ring-2 focus:ring-[#006DAE]/20 transition-all disabled:opacity-60"
             />
@@ -629,7 +629,7 @@ export default function WorkspacePage() {
               {SEGMENTS.map((s) => (
                 <button
                   key={s}
-                  onClick={() => setSegment(s)}
+                  onClick={() => changeMarket(targetDate, s)}
                   disabled={busy}
                   className={`flex-1 text-xs font-bold transition-all disabled:cursor-not-allowed ${
                     segment === s
@@ -652,7 +652,7 @@ export default function WorkspacePage() {
               {STRATEGIES.map((s) => (
                 <button
                   key={s}
-                  onClick={() => setStrategy(s)}
+                  onClick={() => changeStrategy(s)}
                   disabled={busy}
                   className={`flex-1 text-[11px] font-bold transition-all disabled:cursor-not-allowed ${
                     strategy === s
@@ -1308,10 +1308,11 @@ export default function WorkspacePage() {
                           labelFormatter={(b) =>
                             `Block ${b} · ${blockToTime(Number(b))}`
                           }
-                          formatter={(v: number | [number, number], name: string) => [
+                          formatter={(v, name) => [
+                            // The confidence band is a [low, high] range.
                             Array.isArray(v)
-                              ? `₹${v[0].toFixed(3)} to ₹${v[1].toFixed(3)}`
-                              : `₹${v.toFixed(3)}`,
+                              ? `₹${Number(v[0]).toFixed(3)} to ₹${Number(v[1]).toFixed(3)}`
+                              : `₹${Number(v).toFixed(3)}`,
                             name,
                           ]}
                         />

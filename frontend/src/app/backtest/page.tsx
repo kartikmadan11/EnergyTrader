@@ -306,8 +306,8 @@ export default function BacktestPage() {
                 data={result.daily.map((d) => ({ ...d, error: dayError(d).value }))}
                 margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
                 onClick={(e) => {
-                  const date = e?.activePayload?.[0]?.payload?.date;
-                  if (date) setSelectedDate(date);
+                  // The active label is the clicked bar's x value, the date.
+                  if (typeof e.activeLabel === "string") setSelectedDate(e.activeLabel);
                 }}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
@@ -321,8 +321,8 @@ export default function BacktestPage() {
                 <Tooltip
                   cursor={{ fill: "#F1F5F9" }}
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number, _n, item) => [
-                    `${v.toFixed(2)}%`,
+                  formatter={(v, _n, item) => [
+                    `${Number(v).toFixed(2)}%`,
                     `${dayError(item.payload).metric} (${SPLIT_LABEL[item.payload.data_split as BacktestDay["data_split"]]})`,
                   ]}
                 />
@@ -371,7 +371,7 @@ export default function BacktestPage() {
                 />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number) => `₹${v.toFixed(3)}/kWh`}
+                  formatter={(v) => `₹${Number(v).toFixed(3)}/kWh`}
                 />
                 <Legend wrapperStyle={{ fontSize: "12px" }} />
                 <Line
@@ -569,7 +569,7 @@ function ErrorDistribution({ result }: { result: BacktestResult }) {
           <Tooltip
             cursor={{ fill: "#F1F5F9" }}
             contentStyle={TOOLTIP_STYLE}
-            formatter={(v: number, name: string) => [`${v} blocks`, name]}
+            formatter={(v, name) => [`${v} blocks`, name]}
           />
           <Legend wrapperStyle={{ fontSize: "12px" }} />
           <Bar dataKey="tight" stackId="a" fill="#00B398" name={tiles[0].label} />

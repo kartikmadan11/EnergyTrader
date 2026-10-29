@@ -19,6 +19,8 @@ import {
   getHealth,
   triggerScrape,
   errorMessage,
+  type DataHealth,
+  type SegmentHealth,
 } from "@/lib/api";
 import { blockToTime, marketDate } from "@/lib/utils";
 
@@ -114,10 +116,10 @@ const CustomTooltip = ({
   );
 };
 
-interface ScrapeInfo {
-  latest_data: string | null;
-  row_count: number;
-}
+// Asking for the latest forecast of a segment that has none is a 404, so ask only when
+// the health summary says one exists.
+const hasForecast = (health: DataHealth | null, seg: Segment) =>
+  health?.segments[seg]?.latest_forecast != null;
 
 export default function MarketDataSyncPage() {
   const [fetchDays, setFetchDays] = useState<number>(14);
@@ -150,7 +152,7 @@ export default function MarketDataSyncPage() {
     TAM: false,
   });
   const [scrapeInfo, setScrapeInfo] = useState<
-    Record<Segment, ScrapeInfo | null>
+    Record<Segment, SegmentHealth | null>
   >({ DAM: null, RTM: null, TAM: null });
   const [scrapeError, setScrapeError] = useState<
     Record<Segment, string | null>
@@ -162,17 +164,17 @@ export default function MarketDataSyncPage() {
   });
   const [syncingAll, setSyncingAll] = useState(false);
 
-  const loadSegment = async (seg: Segment) => {
+  const loadSegment = async (seg: Segment, withForecast: boolean) => {
     setData((prev) => ({ ...prev, [seg]: { ...prev[seg], loaded: false } }));
     try {
       const [histRaw, forecastRaw] = await Promise.allSettled([
         getHistory(seg, 7),
-        getLatestForecast(seg),
+        withForecast ? getLatestForecast(seg) : Promise.resolve(null),
       ]);
 
       const histRows = histRaw.status === "fulfilled" ? histRaw.value : [];
       const forecast =
-        forecastRaw.status === "fulfilled" && forecastRaw.value.blocks.length
+        forecastRaw.status === "fulfilled" && forecastRaw.value?.blocks.length
           ? forecastRaw.value
           : null;
 
@@ -228,7 +230,7 @@ export default function MarketDataSyncPage() {
     }
   };
 
-  const loadCoverage = () =>
+  const loadCoverage = (): Promise<DataHealth | null> =>
     getHealth()
       .then((h) => {
         setScrapeInfo({
@@ -236,8 +238,9 @@ export default function MarketDataSyncPage() {
           RTM: h.segments.RTM ?? null,
           TAM: h.segments.TAM ?? null,
         });
+        return h;
       })
-      .catch(() => {});
+      .catch(() => null);
 
   const handleScrape = async (seg: Segment) => {
     setScraping((prev) => ({ ...prev, [seg]: true }));
@@ -264,7 +267,8 @@ export default function MarketDataSyncPage() {
           : `Sync failed: ${failures[0]}`,
       }));
     }
-    await Promise.all([loadCoverage(), synced ? loadSegment(seg) : null]);
+    const health = await loadCoverage();
+    if (synced) await loadSegment(seg, hasForecast(health, seg));
     setProgress((prev) => ({ ...prev, [seg]: null }));
     setScraping((prev) => ({ ...prev, [seg]: false }));
   };
@@ -278,8 +282,9 @@ export default function MarketDataSyncPage() {
   };
 
   useEffect(() => {
-    loadCoverage();
-    SEGMENTS.forEach((seg) => loadSegment(seg));
+    loadCoverage().then((health) =>
+      SEGMENTS.forEach((seg) => loadSegment(seg, hasForecast(health, seg))),
+    );
   }, []);
 
   return (

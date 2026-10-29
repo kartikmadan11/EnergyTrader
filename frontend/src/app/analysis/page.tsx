@@ -33,6 +33,10 @@ import PageHeader from "@/components/PageHeader";
 
 const AUDIT_LIMIT = 50;
 
+// An unreachable audit log shows as empty rather than failing the page.
+const latestAudit = (): Promise<AuditEntry[]> =>
+  getAuditLog(undefined, AUDIT_LIMIT).catch(() => []);
+
 const TOOLTIP_STYLE = {
   background: "#ffffff",
   border: "1px solid #e2e8f0",
@@ -139,16 +143,18 @@ export default function AnalysisPage() {
   const [error, setError] = useState("");
 
   const loadAudit = useCallback(async () => {
-    try {
-      setAuditLog(await getAuditLog(undefined, AUDIT_LIMIT));
-    } catch {
-      setAuditLog([]);
-    }
+    setAuditLog(await latestAudit());
   }, []);
 
   useEffect(() => {
-    loadAudit();
-  }, [loadAudit]);
+    let current = true;
+    latestAudit().then((entries) => {
+      if (current) setAuditLog(entries);
+    });
+    return () => {
+      current = false;
+    };
+  }, []);
 
   const handleAnalyze = async () => {
     setLoading(true);
@@ -320,7 +326,7 @@ export default function AnalysisPage() {
                 />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(val: number) => `₹${val.toFixed(3)}/kWh`}
+                  formatter={(val) => `₹${Number(val).toFixed(3)}/kWh`}
                   labelFormatter={(b) => `Block ${b} (${blockToTime(Number(b))})`}
                 />
                 <Legend wrapperStyle={{ fontSize: "12px" }} />
@@ -381,7 +387,7 @@ export default function AnalysisPage() {
                   <Tooltip
                     cursor={{ fill: "#F1F5F9" }}
                     contentStyle={TOOLTIP_STYLE}
-                    formatter={(v: number) => `${v.toFixed(2)}%`}
+                    formatter={(v) => `${Number(v).toFixed(2)}%`}
                     labelFormatter={(b) => `Block ${b} (${blockToTime(Number(b))})`}
                   />
                   <Bar dataKey="error_pct" name="Error" radius={[2, 2, 0, 0]}>
