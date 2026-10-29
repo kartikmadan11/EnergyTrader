@@ -20,6 +20,23 @@ def test_token_round_trip():
     assert verify_token(token, SECRET, now=NOW + 10) == DESK
 
 
+# The web app signs tokens in TypeScript (frontend/src/lib/backend-token.ts); its test pins the
+# same vector, so a change to either side's encoding fails one of the two suites.
+CONTRACT_SECRET = "contract-test-secret"
+CONTRACT_NOW = 1_767_225_600
+CONTRACT_TOKEN = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJzdWIiOiJnaXRodWI6ZGVzay1ub3J0aCIsIm5hbWUiOiJEZXNrIE5vcnRoIiwiaXNzIjoiZW5lcmd5dHJhZGVy"
+    "LXdlYiIsImF1ZCI6ImVuZXJneXRyYWRlci1hcGkiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6MTc2NzIyNTY2MH0."
+    "VpzUbMnF3eCJuzlcqlHZDy8lWa9Swd_pzWPd5jsBHbY"
+)
+
+
+def test_tokens_match_the_web_app_encoding():
+    assert encode_token(DESK, CONTRACT_SECRET, now=CONTRACT_NOW) == CONTRACT_TOKEN
+    assert verify_token(CONTRACT_TOKEN, CONTRACT_SECRET, now=CONTRACT_NOW + 1) == DESK
+
+
 @pytest.mark.parametrize(
     ("token", "now", "reason"),
     [

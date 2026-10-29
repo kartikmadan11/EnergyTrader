@@ -1,8 +1,23 @@
 import axios from "axios";
+import { SIGNED_OUT } from "@/lib/access";
 
+// Requests go through the web app's proxy, which adds the signed-in user's token.
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || "/api",
+  baseURL: "/api",
   headers: { "Content-Type": "application/json" },
+});
+
+// When the session ends, send the user to sign in and back to the page they were on.
+// A 401 from the API itself means its token was refused, so it surfaces as an error instead
+// of looping through sign-in.
+api.interceptors.response.use(undefined, (error) => {
+  if (error?.response?.status === 401 && error.response.data?.reason === SIGNED_OUT) {
+    // A full page load, so no state from the ended session survives.
+    const login = new URL("/login", window.location.origin);
+    login.searchParams.set("callbackUrl", `${window.location.pathname}${window.location.search}`);
+    window.location.assign(login);
+  }
+  return Promise.reject(error);
 });
 
 /**

@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { signOutAction } from "@/app/(app)/actions";
 
 const sections = [
   {
     label: "TRADING",
     items: [
       {
-        href: "/",
+        href: "/workstation",
         label: "Workstation",
         icon: (
           <svg
@@ -22,6 +23,25 @@ const sections = [
               strokeLinejoin="round"
               strokeWidth={2}
               d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1"
+            />
+          </svg>
+        ),
+      },
+      {
+        href: "/blotter",
+        label: "Trade Blotter",
+        icon: (
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"
             />
           </svg>
         ),
@@ -164,7 +184,13 @@ const sections = [
   },
 ];
 
-export default function Sidebar() {
+function initials(name: string): string {
+  const words = name.split(/[\s._-]+/).filter(Boolean);
+  const letters = words.length > 1 ? words[0][0] + words[1][0] : name.slice(0, 2);
+  return letters.toUpperCase();
+}
+
+export default function Sidebar({ user }: { user: { id: string; name: string } }) {
   const pathname = usePathname();
 
   return (
@@ -206,6 +232,37 @@ export default function Sidebar() {
         ))}
       </nav>
 
+      <div className="border-t border-[var(--border)] px-3 py-3 flex items-center gap-2.5">
+        <span
+          aria-hidden
+          className="w-7 h-7 shrink-0 rounded-full bg-[#EEF5FB] text-[#006DAE] text-[10px] font-semibold flex items-center justify-center"
+        >
+          {initials(user.name)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-gray-800 truncate">{user.name}</p>
+          <p className="text-[10px] text-gray-400 truncate" title={user.id}>
+            {user.id}
+          </p>
+        </div>
+        <form action={signOutAction}>
+          <button
+            type="submit"
+            title="Sign out"
+            aria-label="Sign out"
+            className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
+              />
+            </svg>
+          </button>
+        </form>
+      </div>
     </aside>
   );
 }

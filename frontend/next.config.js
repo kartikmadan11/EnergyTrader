@@ -10,17 +10,21 @@ const nextConfig = {
     proxyTimeout: 10 * 60 * 1000,
   },
   async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${BACKEND_URL}/api/:path*`,
-      },
-    ];
+    // Fallback rewrites run after the app's own routes, so /api/auth/* reaches Auth.js
+    // and every other /api request goes to the backend.
+    return {
+      fallback: [
+        {
+          source: "/api/:path*",
+          destination: `${BACKEND_URL}/api/:path*`,
+        },
+      ],
+    };
   },
   async redirects() {
-    // Bid preparation moved into the Workstation at "/".
-    return [{ source: "/bids", destination: "/", permanent: true }];
+    // Bid preparation lives in the Workstation.
+    return [{ source: "/bids", destination: "/workstation", permanent: true }];
   },
 };
 
-module.exports = nextConfig;
+export default nextConfig;
