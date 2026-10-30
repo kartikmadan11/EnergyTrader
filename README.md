@@ -3,7 +3,7 @@
 [![CI](https://github.com/kartikmadan11/EnergyTrader/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikmadan11/EnergyTrader/actions/workflows/ci.yml)
 
 A bidding workstation for Indian power exchanges.
-It forecasts 15-minute clearing prices, builds a bid schedule with a linear program, runs pre-trade checks against the active DSM regulation, and tracks every submitted session on a trade blotter as the market clears.
+It forecasts 15-minute clearing prices, builds a bid schedule with a linear program, runs pre-trade checks against the active DSM regulation, and tracks every submitted session on a blotter as the market clears.
 
 ![EnergyTrader](docs/screenshots/landing.png)
 
@@ -15,7 +15,7 @@ It forecasts 15-minute clearing prices, builds a bid schedule with a linear prog
 4. **Optimize bids.** Allocate volume across blocks with an LP that weighs bid value against DSM penalty exposure and forecast uncertainty.
 5. **Run pre-trade checks.** Seven hard and soft checks produce a verdict; hard failures block submission, and the server re-runs them on submit.
 6. **Submit.** Record the bid set against a session under the signed-in user, with every step written to the audit trail.
-7. **Track.** Follow each session on the trade blotter as clearing prices are published: how many blocks cleared, how much volume, and at what price.
+7. **Track.** Follow each session on the blotter as clearing prices are published: how many blocks cleared, how much volume, and at what price.
 8. **Review.** Compare forecasts and bids with cleared prices: forecast error, bid hit rate, basket rate and uncleared DSM exposure.
 
 ![Workstation](docs/screenshots/workstation.png)
@@ -138,9 +138,9 @@ Cost-at-risk treats each block's clearing price as normal with the forecast σ a
 DSM exposure applies the active policy's tiered penalty to a deviation proxied by the forecast's relative interval width.
 Total exposure is cost-at-risk plus expected DSM penalty, and an alert fires above `RISK_VAR_THRESHOLD_INR`.
 
-### Trade blotter
+### Blotter
 
-The **Trade Blotter** lists every submitted bid session with its delivery date, market, strategy, volume, value, pre-trade verdict and submitting user.
+The **Blotter** lists every submitted bid session with its delivery date, market, strategy, volume, value, pre-trade verdict and submitting user.
 Once the exchange publishes clearing prices for a delivery date, each session shows how much of it cleared, where a block clears when its bid is at or above the market clearing price.
 A session stays pending until any of its blocks is priced, and is then cleared, partial or not cleared by what has cleared so far.
 
@@ -149,7 +149,7 @@ The page refreshes every 15 seconds while live, highlights sessions as they arri
 Opening a session shows its bids against the clearing price block by block, with its audit trail from pre-trade check to submission.
 Each open session has its own URL, `j` and `k` step through the list, and `Esc` closes it.
 
-![Trade blotter](docs/screenshots/blotter.png)
+![Blotter](docs/screenshots/blotter.png)
 
 ![A bid session on the blotter](docs/screenshots/blotter-drawer.png)
 

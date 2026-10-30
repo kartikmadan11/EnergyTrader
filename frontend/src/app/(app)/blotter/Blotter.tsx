@@ -171,7 +171,7 @@ export default function Blotter({ initialSession }: { initialSession: string | n
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
-        title="Trade Blotter"
+        title="Blotter"
         description="Every submitted bid session, with clearing results as prices are published"
         actions={
           <>

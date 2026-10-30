@@ -29,7 +29,7 @@ const sections = [
       },
       {
         href: "/blotter",
-        label: "Trade Blotter",
+        label: "Blotter",
         icon: (
           <svg
             className="w-4 h-4"

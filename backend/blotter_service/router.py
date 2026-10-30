@@ -1,5 +1,5 @@
 """
-Trade blotter endpoints.
+Blotter endpoints.
 
   GET /blotter                 submitted bid sessions: filters, sorting, keyset pagination
   GET /blotter/export          the same rows as CSV

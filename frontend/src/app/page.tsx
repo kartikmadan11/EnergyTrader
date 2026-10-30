@@ -27,7 +27,7 @@ const steps = [
   },
   {
     title: "Review",
-    body: "The trade blotter follows every submitted session to clearing, and post-market analysis scores the forecast.",
+    body: "The blotter follows every submitted session to clearing, and post-market analysis scores the forecast.",
   },
 ];
 

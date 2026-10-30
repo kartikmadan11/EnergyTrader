@@ -1,7 +1,7 @@
 # Roadmap
 
 This document plans the next stage of EnergyTrader: a Rust trading core, roles with four-eyes approval, and a blotter that updates live.
-The landing page, sign-in and a first trade blotter are delivered, and sections 4 and 5 record what was built and what remains.
+The landing page, sign-in and a first blotter are delivered, and sections 4 and 5 record what was built and what remains.
 It also records known modeling issues that the new work should fix rather than carry forward.
 Each section states the decision, the reason for it, and how we will know it worked.
 
@@ -16,7 +16,7 @@ Its proxy attaches a 60-second signed token naming the user to every API call, a
 Audit entries name the signed-in user, while rows written before sign-in existed show `trader`.
 Every signed-in user has the same permissions, because there are no roles yet.
 Submitting a bid set writes rows to the `bids` table with status `submitted` and an audit entry; nothing is sent to an exchange.
-The trade blotter lists every submitted session and derives how much of it cleared from published prices.
+The blotter lists every submitted session and derives how much of it cleared from published prices.
 Model training runs inside the API process, so a long retrain competes with interactive requests.
 
 A walk-forward backtest over 1 to 28 October 2026 gives a MAPE of 13.8% for DAM, 28.4% for RTM and 14.6% for TAM, with R² of 0.88, 0.70 and 0.05.
@@ -297,7 +297,7 @@ This replaces the handwritten types in `frontend/src/lib/api.ts`, which can drif
 The order is read-only routes first (policy list, active and compare, audit log), then validation, risk and pre-trade checks, then submission, where the event store and four-eyes approval start.
 After that comes the optimizer (`recommend`, `tune` and `compare-strategies`), then post-market review.
 
-## 4. Trade blotter
+## 4. Blotter
 
 ### 4.1 Purpose
 

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Blotter from "./Blotter";
 
-export const metadata: Metadata = { title: "Trade Blotter" };
+export const metadata: Metadata = { title: "Blotter" };
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
