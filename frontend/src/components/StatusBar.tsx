@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { getActivePolicy, pingApi, POLICY_CHANGED_EVENT } from "@/lib/api";
+import { getActivePolicy, POLICY_CHANGED_EVENT } from "@/lib/api";
 
 const POLL_MS = 30_000;
 
@@ -13,12 +13,9 @@ const IST_TIME = new Intl.DateTimeFormat("en-IN", {
   hour12: false,
 });
 
-type ApiState = "checking" | "online" | "offline";
-
-/** Header status: IST market clock, active DSM policy and API reachability. */
+/** Header status: IST market clock and the active DSM policy. */
 export default function StatusBar() {
   const [clock, setClock] = useState<string | null>(null);
-  const [apiState, setApiState] = useState<ApiState>("checking");
   const [policy, setPolicy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,10 +23,6 @@ export default function StatusBar() {
 
     const tickClock = () => setClock(IST_TIME.format(new Date()));
     const refresh = async () => {
-      const online = await pingApi();
-      if (cancelled) return;
-      setApiState(online ? "online" : "offline");
-      if (!online) return;
       try {
         const active = await getActivePolicy();
         if (!cancelled) setPolicy(active.name);
@@ -68,22 +61,6 @@ export default function StatusBar() {
           <span className="text-white/90 font-medium">{policy}</span>
         </Link>
       )}
-      <span className="flex items-center gap-1.5" role="status">
-        <span
-          className={`w-1.5 h-1.5 rounded-full ${
-            apiState === "online"
-              ? "bg-[#00B398]"
-              : apiState === "offline"
-                ? "bg-red-400"
-                : "bg-white/40"
-          }`}
-        />
-        {apiState === "online"
-          ? "API online"
-          : apiState === "offline"
-            ? "API offline"
-            : "Connecting…"}
-      </span>
     </div>
   );
 }

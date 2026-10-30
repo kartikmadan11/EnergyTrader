@@ -545,16 +545,6 @@ export function blotterExportUrl(filters: BlotterFilters, order: BlotterOrder): 
 }
 
 // ---- Health / Fallback ----
-/** API liveness probe. */
-export async function pingApi(): Promise<boolean> {
-  try {
-    const res = await api.get("/health", { timeout: 5000 });
-    return res.data?.status === "ok";
-  } catch {
-    return false;
-  }
-}
-
 export interface SegmentHealth {
   latest_data: string | null;
   row_count: number;
