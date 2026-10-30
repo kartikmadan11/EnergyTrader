@@ -14,14 +14,48 @@ export function actorId(provider: string, handle: string): string {
 
 /**
  * Whether an actor id may sign in, given AUTH_ALLOWED_USERS: a comma-separated list of ids,
- * or "*" for any account the provider authenticates. An empty list admits nobody.
+ * "provider:*" for any account that provider authenticates, or "*" for any account at all.
+ * An empty list admits nobody.
  */
 export function isAllowed(id: string, allowlist: string | undefined): boolean {
   const entries = (allowlist ?? "")
     .split(",")
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
-  return entries.includes("*") || entries.includes(id.toLowerCase());
+  const actor = id.toLowerCase();
+  const provider = actor.slice(0, actor.indexOf(":") + 1);
+  return (
+    entries.includes("*") ||
+    entries.includes(actor) ||
+    (provider !== "" && entries.includes(`${provider}*`))
+  );
+}
+
+/** How long a session lasts from sign-in, however active it stays: one trading day. */
+export const SESSION_MAX_AGE_S = 12 * 60 * 60;
+
+/** What the session cookie records about a sign-in. */
+export interface SessionClaims {
+  actorId?: unknown;
+  /** Unix seconds. */
+  signedInAt?: unknown;
+}
+
+/**
+ * Whether a session may continue. It ends SESSION_MAX_AGE_S after sign-in, and as soon as its
+ * account is no longer admitted by the allowlist, so removing someone takes effect on their
+ * next request rather than when their cookie expires. Local sessions only count in development.
+ */
+export function sessionIsCurrent(
+  claims: SessionClaims,
+  allowlist: string | undefined,
+  { nowS, development }: { nowS: number; development: boolean },
+): boolean {
+  const { actorId: id, signedInAt } = claims;
+  if (typeof id !== "string" || typeof signedInAt !== "number") return false;
+  if (nowS - signedInAt >= SESSION_MAX_AGE_S || signedInAt > nowS + 60) return false;
+  if (id.startsWith("local:")) return development;
+  return isAllowed(id, allowlist);
 }
 
 /**

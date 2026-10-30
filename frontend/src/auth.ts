@@ -5,18 +5,33 @@
  * - GitHub when AUTH_GITHUB_ID and AUTH_GITHUB_SECRET are set.
  * - In `next dev` only, a name-only local sign-in so the app runs without an OAuth app.
  *
- * OAuth accounts must be listed in AUTH_ALLOWED_USERS ("*" admits any account).
- * Sessions are stateless JWTs in an encrypted cookie; there is no user database.
+ * OAuth accounts must be listed in AUTH_ALLOWED_USERS, by id or as "provider:*".
+ * Sessions are stateless JWTs in an encrypted cookie; there is no user database. Each one
+ * ends 12 hours after sign-in, or on the next request once its account leaves the list.
  */
 import NextAuth, { type DefaultSession, type Profile, type User } from "next-auth";
 import type { OIDCConfig } from "next-auth/providers";
 import Credentials from "next-auth/providers/credentials";
 import GitHub from "next-auth/providers/github";
-import { actorId, isAllowed, localUser } from "@/lib/access";
+import {
+  SESSION_MAX_AGE_S,
+  actorId,
+  isAllowed,
+  localUser,
+  sessionIsCurrent,
+} from "@/lib/access";
 
 declare module "next-auth" {
   interface Session {
     user: { id: string } & DefaultSession["user"];
+  }
+}
+
+declare module "@auth/core/jwt" {
+  interface JWT {
+    actorId?: string;
+    /** Unix seconds. */
+    signedInAt?: number;
   }
 }
 
@@ -92,7 +107,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   ],
   // Auth.js refuses to start without a secret; production must set AUTH_SECRET.
   secret: DEVELOPMENT && !process.env.AUTH_SECRET ? "development-only-secret" : undefined,
-  session: { strategy: "jwt", maxAge: 12 * 60 * 60, updateAge: 60 * 60 },
+  session: { strategy: "jwt", maxAge: SESSION_MAX_AGE_S, updateAge: 60 * 60 },
   pages: { signIn: "/login", error: "/login" },
   callbacks: {
     signIn({ account, profile, user }) {
@@ -105,8 +120,17 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return `/login?error=AccessDenied&account=${encodeURIComponent(id)}`;
     },
     jwt({ token, account, profile, user }) {
-      if (account) token.actorId = actorFor(account.provider, profile, user);
-      return token;
+      if (account) {
+        token.actorId = actorFor(account.provider, profile, user);
+        token.signedInAt = Math.floor(Date.now() / 1000);
+        return token;
+      }
+      // Runs on every request that reads the session; null signs the user out.
+      const current = sessionIsCurrent(token, process.env.AUTH_ALLOWED_USERS, {
+        nowS: Math.floor(Date.now() / 1000),
+        development: DEVELOPMENT,
+      });
+      return current ? token : null;
     },
     session({ session, token }) {
       if (typeof token.actorId === "string") session.user.id = token.actorId;
