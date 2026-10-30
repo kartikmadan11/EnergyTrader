@@ -64,6 +64,6 @@ export default auth((req) => {
 });
 
 export const config = {
-  // Everything except Auth.js's own routes and build assets.
-  matcher: ["/((?!api/auth/|_next/static/|_next/image|icon\\.svg$).*)"],
+  // Everything except Auth.js's own routes, build assets and the site icons.
+  matcher: ["/((?!api/auth/|_next/static/|_next/image|(?:favicon\\.ico|icon\\.svg)$).*)"],
 };
