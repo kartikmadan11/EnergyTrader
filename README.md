@@ -18,6 +18,8 @@ It forecasts 15-minute clearing prices, builds a bid schedule with a linear prog
 7. **Track.** Follow each session on the blotter as clearing prices are published: how many blocks cleared, how much volume, and at what price.
 8. **Review.** Compare forecasts and bids with cleared prices: forecast error, bid hit rate, basket rate and uncleared DSM exposure.
 
+On any price chart, press and drag to read the change between two points, as on a market chart.
+
 ![Workstation](docs/screenshots/workstation.png)
 
 ## Quick start
