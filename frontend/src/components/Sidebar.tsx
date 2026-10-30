@@ -1,8 +1,10 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signOutAction } from "@/app/(app)/actions";
+import { sidebarCookie } from "@/lib/sidebar";
 
 const sections = [
   {
@@ -190,16 +192,85 @@ function initials(name: string): string {
   return letters.toUpperCase();
 }
 
-export default function Sidebar({ user }: { user: { id: string; name: string } }) {
+type TipContent = { text: string; hint?: string };
+type Tip = TipContent & { top: number; left: number };
+
+function shortcutLabel(): string {
+  return /Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘B" : "Ctrl+B";
+}
+
+export default function Sidebar({
+  user,
+  defaultCollapsed,
+}: {
+  user: { id: string; name: string };
+  defaultCollapsed: boolean;
+}) {
   const pathname = usePathname();
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  // Collapsed, the labels give way to tooltips. They are fixed to the viewport because the
+  // nav scrolls, which would clip anything positioned past its edge.
+  const [tip, setTip] = useState<Tip | null>(null);
+
+  useEffect(() => {
+    document.cookie = sidebarCookie(collapsed);
+  }, [collapsed]);
+
+  const toggle = useCallback(() => {
+    setTip(null);
+    setCollapsed((c) => !c);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "b" || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      e.preventDefault();
+      toggle();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [toggle]);
+
+  const showTip = (content: () => TipContent) => (e: React.SyntheticEvent<HTMLElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setTip({ ...content(), top: r.top + r.height / 2, left: r.right + 12 });
+  };
+  const hideTip = () => setTip(null);
+  const tipHandlers = (content: () => TipContent) => ({
+    onMouseEnter: showTip(content),
+    onMouseLeave: hideTip,
+    onFocus: showTip(content),
+    onBlur: hideTip,
+  });
+  const railTip = (text: string) => (collapsed ? tipHandlers(() => ({ text })) : {});
+  // The shortcut is read from the browser, so it is only known once the tooltip opens.
+  const toggleTip = () => ({
+    text: collapsed ? "Expand sidebar" : "Collapse sidebar",
+    hint: shortcutLabel(),
+  });
 
   return (
-    <aside className="w-56 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col shrink-0">
-      <nav className="flex-1 px-2 py-3 space-y-4 overflow-y-auto">
-        {sections.map((section) => (
+    <aside
+      className={`${collapsed ? "w-14" : "w-56"} bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col shrink-0 overflow-hidden transition-[width] duration-200 ease-out motion-reduce:transition-none`}
+    >
+      <nav
+        id="app-sidebar-nav"
+        aria-label="Main"
+        onScroll={hideTip}
+        className="flex-1 px-2 py-3 space-y-4 overflow-y-auto overflow-x-hidden"
+      >
+        {sections.map((section, i) => (
           <div key={section.label}>
-            <p className="px-3 mb-1 text-[9px] font-bold tracking-widest text-gray-400 uppercase">
-              {section.label}
+            {/* Collapsed, the heading keeps its height, so the icons stay where they were. */}
+            <p className="px-3 mb-1 h-3.5 flex items-center text-[9px] font-bold tracking-widest text-gray-400 uppercase whitespace-nowrap">
+              {!collapsed ? (
+                section.label
+              ) : (
+                <>
+                  <span className="sr-only">{section.label}</span>
+                  {i > 0 && <span aria-hidden className="w-4 h-px bg-gray-200" />}
+                </>
+              )}
             </p>
             <div className="space-y-0.5">
               {section.items.map((item) => {
@@ -209,7 +280,8 @@ export default function Sidebar({ user }: { user: { id: string; name: string } }
                     key={item.href}
                     href={item.href}
                     aria-current={isActive ? "page" : undefined}
-                    className={`flex items-center gap-2.5 px-3 py-2 rounded-md border text-xs transition-colors ${
+                    {...railTip(item.label)}
+                    className={`flex items-center gap-2.5 px-3 py-2 rounded-md border text-xs whitespace-nowrap transition-colors ${
                       isActive
                         ? "bg-[#EEF5FB] text-[#006DAE] border-[#006DAE]/20 font-medium"
                         : "border-transparent text-gray-600 hover:bg-gray-100 hover:text-gray-900"
@@ -220,8 +292,8 @@ export default function Sidebar({ user }: { user: { id: string; name: string } }
                     >
                       {item.icon}
                     </span>
-                    {item.label}
-                    {isActive && (
+                    <span className={collapsed ? "sr-only" : undefined}>{item.label}</span>
+                    {isActive && !collapsed && (
                       <span className="ml-auto w-1 h-1 bg-[var(--brand-teal)] rounded-full" />
                     )}
                   </Link>
@@ -232,14 +304,44 @@ export default function Sidebar({ user }: { user: { id: string; name: string } }
         ))}
       </nav>
 
-      <div className="border-t border-[var(--border)] px-3 py-3 flex items-center gap-2.5">
+      <div className="px-2 pb-2">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-controls="app-sidebar-nav"
+          aria-expanded={!collapsed}
+          aria-keyshortcuts="Meta+B Control+B"
+          {...tipHandlers(toggleTip)}
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md border border-transparent text-xs text-gray-500 whitespace-nowrap hover:bg-gray-100 hover:text-gray-900 transition-colors"
+        >
+          <svg
+            aria-hidden
+            className={`w-4 h-4 shrink-0 text-gray-400 transition-transform duration-200 motion-reduce:transition-none ${collapsed ? "rotate-180" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+          </svg>
+          <span className={collapsed ? "sr-only" : undefined}>
+            {collapsed ? "Expand sidebar" : "Collapse"}
+          </span>
+        </button>
+      </div>
+
+      <div
+        className={`border-t border-[var(--border)] py-3 flex items-center ${
+          collapsed ? "flex-col gap-2 px-2" : "gap-2.5 px-3"
+        }`}
+      >
         <span
           aria-hidden
+          {...railTip(`${user.name} · ${user.id}`)}
           className="w-7 h-7 shrink-0 rounded-full bg-[#EEF5FB] text-[#006DAE] text-[10px] font-semibold flex items-center justify-center"
         >
           {initials(user.name)}
         </span>
-        <div className="min-w-0 flex-1">
+        <div className={collapsed ? "sr-only" : "min-w-0 flex-1"}>
           <p className="text-xs font-medium text-gray-800 truncate">{user.name}</p>
           <p className="text-[10px] text-gray-400 truncate" title={user.id}>
             {user.id}
@@ -248,8 +350,9 @@ export default function Sidebar({ user }: { user: { id: string; name: string } }
         <form action={signOutAction}>
           <button
             type="submit"
-            title="Sign out"
+            title={collapsed ? undefined : "Sign out"}
             aria-label="Sign out"
+            {...railTip("Sign out")}
             className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -263,6 +366,17 @@ export default function Sidebar({ user }: { user: { id: string; name: string } }
           </button>
         </form>
       </div>
+
+      {tip && (
+        <span
+          aria-hidden
+          style={{ top: tip.top, left: tip.left }}
+          className="fixed z-50 -translate-y-1/2 pointer-events-none flex items-center gap-2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white shadow-lg"
+        >
+          {tip.text}
+          {tip.hint && <kbd className="font-sans text-[10px] text-gray-400">{tip.hint}</kbd>}
+        </span>
+      )}
     </aside>
   );
 }
