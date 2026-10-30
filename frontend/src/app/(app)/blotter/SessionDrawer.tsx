@@ -222,7 +222,7 @@ function Detail({ detail }: { detail: BlotterDetail }) {
     [
       "Market",
       <span key="market" className="flex items-center gap-2">
-        <span className={`rounded border px-1.5 py-px text-[10px] font-semibold ${SEGMENT_STYLE[s.segment] ?? ""}`}>
+        <span className={`rounded border px-1.5 py-px text-[10px] font-semibold leading-4 ${SEGMENT_STYLE[s.segment] ?? ""}`}>
           {s.segment}
         </span>
         <span className="capitalize">{s.strategy}</span>

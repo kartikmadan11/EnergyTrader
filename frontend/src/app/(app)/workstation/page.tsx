@@ -660,7 +660,7 @@ export default function WorkspacePage() {
                   key={s}
                   onClick={() => changeStrategy(s)}
                   disabled={busy}
-                  className={`flex-1 text-[11px] font-bold transition-all disabled:cursor-not-allowed ${
+                  className={`flex-auto whitespace-nowrap px-2 text-[11px] font-bold transition-all disabled:cursor-not-allowed ${
                     strategy === s
                       ? STRATEGY_META[s].activeClass + " shadow-inner"
                       : "bg-white text-gray-600 hover:bg-gray-100"
