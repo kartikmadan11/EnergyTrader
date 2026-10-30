@@ -4,6 +4,9 @@ const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
 const nextConfig = {
   // Keep `next dev` from writing an AGENTS.md into the project when it detects a coding agent.
   agentRules: false,
+  // The indicator covers the signed-in user in the sidebar, and every other corner holds
+  // a control. Compile and runtime errors still appear without it.
+  devIndicators: false,
   experimental: {
     // The /api proxy drops requests after 30s by default. Training with CV tuning
     // over a long history can take minutes, so allow up to 10.
