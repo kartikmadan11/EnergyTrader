@@ -35,6 +35,7 @@ import {
   STRATEGIES,
   getTomorrowDate,
   formatINR,
+  newSessionId,
 } from "@/lib/utils";
 import Spinner from "@/components/Spinner";
 
@@ -200,6 +201,9 @@ export default function WorkspacePage() {
 
   // Workflow
   const [stage, setStage] = useState<Stage>("idle");
+  // Identifies the current bid set from its pre-trade checks through to submission, so
+  // the blotter shows the checks in the session's history and a repeat submit is refused.
+  const [draftId, setDraftId] = useState(newSessionId);
   const [submitResult, setSubmitResult] = useState<SubmitResult | null>(null);
   const [validationResult, setValidationResult] =
     useState<ValidationResult | null>(null);
@@ -218,6 +222,7 @@ export default function WorkspacePage() {
 
   const clearBids = () => {
     setBidRows([]);
+    setDraftId(newSessionId());
     setLiveRisk(null);
     setRiskLoading(false);
     setSubmitResult(null);
@@ -348,6 +353,7 @@ export default function WorkspacePage() {
         };
       });
       setBidRows(merged);
+      setDraftId(newSessionId());
       setStage("ready");
     } catch (e) {
       setError(errorMessage(e, "Failed to get bid recommendations."));
@@ -391,7 +397,7 @@ export default function WorkspacePage() {
     setApprovalResult(null);
     try {
       const result = await requestApproval(
-        `ws-${Date.now()}`,
+        draftId,
         targetDate,
         segment,
         strategy,
@@ -411,7 +417,7 @@ export default function WorkspacePage() {
     setError("");
     try {
       setSubmitResult(
-        await submitBids(targetDate, strategy, segment, bidPayload()),
+        await submitBids(draftId, targetDate, strategy, segment, bidPayload()),
       );
       setStage("submitted");
     } catch (e) {

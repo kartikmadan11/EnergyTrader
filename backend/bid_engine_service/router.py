@@ -2,6 +2,7 @@ import uuid
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approval_service.service import InvalidBidSet, evaluate_bid_set
@@ -18,6 +19,8 @@ from .optimizer import generate_recommendations, validate_constraints
 router = APIRouter(prefix="/bids", tags=["Bid Engine"])
 
 _KWH_PER_MW_BLOCK = BLOCK_DURATION_MIN / 60.0 * 1000
+SESSION_ID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+_ALREADY_SUBMITTED = "This bid set has already been submitted."
 
 
 async def _optimizer_input(db: AsyncSession, target_date: str, segment: str) -> list[dict]:
@@ -88,6 +91,11 @@ async def submit_bids(
     target_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     strategy: str = Query("balanced", pattern=r"^(conservative|balanced|aggressive)$"),
     segment: str = Query(..., pattern=r"^(DAM|RTM|TAM)$"),
+    session_id: str | None = Query(
+        None,
+        pattern=SESSION_ID_PATTERN,
+        description="Lower-case UUID the bid set was checked under. Defaults to a new one.",
+    ),
     bids: list[BidItem] = Body(...),
     db: AsyncSession = Depends(get_db),
     actor: Actor = Depends(current_actor),
@@ -96,8 +104,14 @@ async def submit_bids(
     Submit a bid set for a delivery date and segment.
 
     The set is re-evaluated server-side and rejected with 422 unless the pre-trade
-    checks allow submission.
+    checks allow submission. Passing the session_id used for the pre-trade checks keeps
+    them in the session's history, and makes a repeated submit fail with 409 instead of
+    recording the bids twice.
     """
+    session_id = session_id or str(uuid.uuid4())
+    if await db.scalar(select(Bid.id).where(Bid.session_id == session_id).limit(1)) is not None:
+        raise HTTPException(409, _ALREADY_SUBMITTED)
+
     try:
         evaluation = await evaluate_bid_set(
             db, target_date=target_date, segment=segment, strategy=strategy, bids=bids
@@ -115,7 +129,6 @@ async def submit_bids(
             },
         )
 
-    session_id = str(uuid.uuid4())
     for item in bids:
         db.add(
             Bid(
@@ -149,7 +162,12 @@ async def submit_bids(
             },
         )
     )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # A concurrent submit of the same session won the race to the unique index.
+        await db.rollback()
+        raise HTTPException(409, _ALREADY_SUBMITTED) from exc
 
     return {
         "session_id": session_id,

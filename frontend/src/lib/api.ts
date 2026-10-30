@@ -237,15 +237,19 @@ export interface SubmitResult {
   status: "submitted";
 }
 
-/** Submit a bid set. The server re-runs the pre-trade checks and returns 422 if they block it. */
+/**
+ * Submit a bid set under the session id its pre-trade checks ran with. The server re-runs
+ * the checks and returns 422 if they block it, or 409 if the session was already submitted.
+ */
 export async function submitBids(
+  sessionId: string,
   targetDate: string,
   strategy: string,
   segment: string,
   bids: BidItem[],
 ): Promise<SubmitResult> {
   const res = await api.post("/bids/submit", bids, {
-    params: { target_date: targetDate, strategy, segment },
+    params: { session_id: sessionId, target_date: targetDate, strategy, segment },
   });
   return res.data;
 }

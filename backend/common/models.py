@@ -45,9 +45,11 @@ class Bid(Base):
     """Submitted bids, one row per block, grouped by session_id."""
 
     __tablename__ = "bids"
+    # One bid per block in a session, which also stops a session being submitted twice.
+    __table_args__ = (Index("uq_bids_session_block", "session_id", "block", unique=True),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(String(36), nullable=False, index=True)  # groups one submission
+    session_id = Column(String(36), nullable=False)  # groups one submission
     created_at = Column(DateTime, server_default=func.now())
     target_date = Column(String(10), nullable=False)
     block = Column(Integer, nullable=False)
