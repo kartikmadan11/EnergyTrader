@@ -1177,8 +1177,14 @@ export default function WorkspacePage() {
             session {submitResult.session_id}
           </span>
           <Link
-            href="/analysis"
+            href={`/blotter?session=${submitResult.session_id}`}
             className="ml-auto text-[11px] font-medium text-[#006DAE] hover:underline"
+          >
+            View in blotter →
+          </Link>
+          <Link
+            href="/analysis"
+            className="text-[11px] font-medium text-[#006DAE] hover:underline"
           >
             Post-market analysis →
           </Link>

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "EnergyTrader",
+  title: { default: "EnergyTrader", template: "%s · EnergyTrader" },
   description:
     "Bidding workstation for Indian power exchanges: price forecasting, bid optimization, pre-trade checks and post-market review.",
 };

@@ -424,6 +424,126 @@ export async function postMarketAnalysis(
   return res.data;
 }
 
+// ---- Blotter ----
+export type BlotterStatus = "pending" | "cleared" | "partial" | "not_cleared";
+export type BlotterSort = "submitted" | "delivery" | "volume" | "value" | "fill";
+
+/** One submitted bid set, with clearing results once prices are published. */
+export interface BlotterRow {
+  session_id: string;
+  /** UTC */
+  submitted_at: string | null;
+  submitted_by: string | null;
+  target_date: string;
+  segment: string;
+  strategy: string;
+  block_count: number;
+  volume_mwh: number;
+  /** Volume-weighted bid price, INR/kWh. */
+  avg_price: number;
+  value_inr: number;
+  overrides: number;
+  verdict: string | null;
+  score: number | null;
+  status: BlotterStatus;
+  /** Blocks with a published clearing price. */
+  priced_blocks: number;
+  cleared_blocks: number;
+  cleared_mwh: number;
+  /** Cleared volume at the clearing price. */
+  cleared_cost_inr: number;
+  /** Cleared share of bid volume, in percent; null while pending. */
+  fill_pct: number | null;
+}
+
+/** Aggregates over every row matching the filters, not just the loaded page. */
+export interface BlotterTotals {
+  sessions: number;
+  volume_mwh: number;
+  value_inr: number;
+  priced_volume_mwh: number;
+  cleared_mwh: number;
+  cleared_cost_inr: number;
+}
+
+export interface BlotterPage {
+  rows: BlotterRow[];
+  next_cursor: string | null;
+  totals: BlotterTotals;
+}
+
+export interface BlotterBlock {
+  block: number;
+  price: number;
+  volume_mw: number;
+  mcp: number | null;
+  /** Null until the block's clearing price exists. */
+  cleared: boolean | null;
+  is_overridden: boolean;
+  override_reason: string | null;
+}
+
+export interface BlotterEvent {
+  timestamp: string | null;
+  user: string | null;
+  action: string;
+  details: Record<string, unknown> | null;
+}
+
+export interface BlotterDetail {
+  session: BlotterRow;
+  blocks: BlotterBlock[];
+  events: BlotterEvent[];
+}
+
+export interface BlotterFilters {
+  segment?: string;
+  strategy?: string;
+  status?: BlotterStatus;
+  delivery_from?: string;
+  delivery_to?: string;
+  trader?: string;
+  /** Session id prefix. */
+  q?: string;
+}
+
+export interface BlotterOrder {
+  sort: BlotterSort;
+  order: "asc" | "desc";
+}
+
+/** Query string for the blotter, leaving out filters that are not set. */
+export function blotterQuery(filters: BlotterFilters, order: BlotterOrder): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries({ ...filters, ...order })) {
+    if (value) params.set(key, value);
+  }
+  return params;
+}
+
+export async function getBlotter(
+  filters: BlotterFilters,
+  order: BlotterOrder,
+  limit: number,
+  cursor?: string,
+): Promise<BlotterPage> {
+  const params = blotterQuery(filters, order);
+  params.set("limit", String(limit));
+  if (cursor) params.set("cursor", cursor);
+  const res = await api.get("/blotter", { params });
+  return res.data;
+}
+
+export async function getBlotterSession(sessionId: string): Promise<BlotterDetail> {
+  const res = await api.get(`/blotter/${encodeURIComponent(sessionId)}`);
+  return res.data;
+}
+
+/** CSV of every matching session, up to the API's export limit, for a plain download link. */
+export function blotterExportUrl(filters: BlotterFilters, order: BlotterOrder): string {
+  return `/api/blotter/export?${blotterQuery(filters, order)}`;
+}
+
 // ---- Health / Fallback ----
 /** API liveness probe. */
 export async function pingApi(): Promise<boolean> {

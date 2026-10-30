@@ -6,7 +6,7 @@ import PriceCurve from "@/components/PriceCurve";
 import { safeCallbackPath } from "@/lib/access";
 import { signInLocally, signInWithProvider } from "./actions";
 
-export const metadata: Metadata = { title: "Sign in · EnergyTrader" };
+export const metadata: Metadata = { title: "Sign in" };
 
 // Only echo values shaped like an actor id, so a crafted link cannot put arbitrary text here.
 const ACTOR_ID = /^[a-z]+:[a-z0-9._-]{1,64}$/;
