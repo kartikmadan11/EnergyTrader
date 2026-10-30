@@ -21,6 +21,7 @@ import {
   type BlotterRow,
 } from "@/lib/api";
 import { blockToTime, formatINR } from "@/lib/utils";
+import RangeMeasure, { MEASURE_MARGIN_TOP } from "@/components/RangeMeasure";
 import { ACTION_LABEL, SEGMENT_STYLE, STATUS, VERDICT, deliveryDate, mwh, percent, price, submittedAt } from "./format";
 
 const TOOLTIP_STYLE = {
@@ -299,9 +300,9 @@ function BlockChart({ blocks }: { blocks: BlotterBlock[] }) {
   const priced = blocks.some((b) => b.mcp !== null);
   return (
     <div>
-      <div className="h-52">
+      <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={blocks} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
+          <ComposedChart data={blocks} margin={{ top: MEASURE_MARGIN_TOP, right: 4, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" vertical={false} />
             <XAxis
               dataKey="block"
@@ -368,6 +369,16 @@ function BlockChart({ blocks }: { blocks: BlotterBlock[] }) {
                 isAnimationActive={false}
               />
             )}
+            {/* The bid price has every block; the clearing price can be out for only some. */}
+            <RangeMeasure
+              data={blocks}
+              xKey="block"
+              yKey="price"
+              yAxisId="price"
+              color="#006DAE"
+              formatX={(b) => blockToTime(b.block)}
+              formatPrice={(v) => `₹${v.toFixed(2)}`}
+            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
@@ -488,7 +499,7 @@ function DetailSkeleton() {
           </div>
         ))}
       </div>
-      <div className="h-52 rounded-lg bg-gray-50 animate-pulse" />
+      <div className="h-56 rounded-lg bg-gray-50 animate-pulse" />
     </div>
   );
 }

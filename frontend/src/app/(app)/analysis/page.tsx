@@ -30,6 +30,7 @@ import {
 } from "@/lib/utils";
 import Spinner from "@/components/Spinner";
 import PageHeader from "@/components/PageHeader";
+import RangeMeasure, { MEASURE_MARGIN_TOP } from "@/components/RangeMeasure";
 
 const AUDIT_LIMIT = 50;
 
@@ -309,8 +310,11 @@ export default function AnalysisPage() {
                 </span>
               )}
             </div>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={comparison}>
+            <ResponsiveContainer width="100%" height={320}>
+              <LineChart
+                data={comparison}
+                margin={{ top: MEASURE_MARGIN_TOP, right: 5, bottom: 5, left: 5 }}
+              >
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <XAxis
                   dataKey="block"
@@ -359,6 +363,14 @@ export default function AnalysisPage() {
                     connectNulls
                   />
                 )}
+                <RangeMeasure
+                  data={comparison}
+                  xKey="block"
+                  yKey="actual"
+                  color="#00B398"
+                  formatX={(d) => blockToTime(d.block)}
+                  formatPrice={(v) => `₹${v.toFixed(3)}`}
+                />
               </LineChart>
             </ResponsiveContainer>
           </div>

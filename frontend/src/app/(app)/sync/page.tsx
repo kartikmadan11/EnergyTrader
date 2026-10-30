@@ -22,7 +22,8 @@ import {
   type DataHealth,
   type SegmentHealth,
 } from "@/lib/api";
-import { blockToTime, marketDate } from "@/lib/utils";
+import { blockToTime, marketDate, shortDate } from "@/lib/utils";
+import RangeMeasure, { MEASURE_MARGIN_TOP } from "@/components/RangeMeasure";
 
 const SEGMENTS = ["DAM", "RTM", "TAM"] as const;
 type Segment = (typeof SEGMENTS)[number];
@@ -66,6 +67,8 @@ const SEGMENT_META: Record<
 
 interface ChartPoint {
   key: string;
+  date: string;
+  block: number;
   label: string;
   actual?: number;
   predicted?: number;
@@ -185,7 +188,7 @@ export default function MarketDataSyncPage() {
         const key = `${date}|${String(block).padStart(2, "0")}`;
         let p = byKey.get(key);
         if (!p) {
-          p = { key, label: `${date.slice(5)} ${blockToTime(block)}` };
+          p = { key, date, block, label: `${date.slice(5)} ${blockToTime(block)}` };
           byKey.set(key, p);
         }
         return p;
@@ -457,16 +460,16 @@ export default function MarketDataSyncPage() {
 
             {/* Chart or Empty State */}
             {!state.loaded ? (
-              <div className="h-52 bg-gray-50 animate-pulse rounded-lg flex items-center justify-center">
+              <div className="h-56 bg-gray-50 animate-pulse rounded-lg flex items-center justify-center">
                 <p className="text-xs text-gray-400">Loading {seg} data…</p>
               </div>
             ) : state.points.length > 0 ? (
               <div>
-                <div className="h-52">
+                <div className="h-56">
                   <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart
                       data={state.points}
-                      margin={{ top: 8, right: 12, bottom: 4, left: 4 }}
+                      margin={{ top: MEASURE_MARGIN_TOP, right: 12, bottom: 4, left: 4 }}
                     >
                       <defs>
                         <linearGradient id={`histGrad-${seg}`} x1="0" y1="0" x2="0" y2="1">
@@ -511,6 +514,14 @@ export default function MarketDataSyncPage() {
                           activeDot={{ r: 4, fill: meta.predColor, strokeWidth: 1.5, stroke: "white" }}
                         />
                       )}
+                      <RangeMeasure
+                        data={state.points}
+                        xKey="label"
+                        yKey="actual"
+                        color={meta.color}
+                        formatX={(p) => `${shortDate(p.date)} ${blockToTime(p.block)}`}
+                        formatPrice={(v) => `₹${v.toFixed(3)}`}
+                      />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>

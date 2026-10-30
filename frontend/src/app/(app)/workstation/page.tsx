@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import Link from "next/link";
 import PageHeader from "@/components/PageHeader";
+import RangeMeasure, { MEASURE_MARGIN_TOP } from "@/components/RangeMeasure";
 import {
   predictPrices,
   recommendBids,
@@ -1284,11 +1285,11 @@ export default function WorkspacePage() {
 
               {chartOpen && (
                 <div className="mt-4 pt-4 border-t border-gray-200">
-                  <div className="h-48 bg-gradient-to-br from-gray-50/50 to-blue-50/30 rounded-lg p-3">
+                  <div className="h-52 bg-gradient-to-br from-gray-50/50 to-blue-50/30 rounded-lg p-3">
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart
                         data={chartData}
-                        margin={{ top: 8, right: 12, bottom: 4, left: 4 }}
+                        margin={{ top: MEASURE_MARGIN_TOP, right: 12, bottom: 4, left: 4 }}
                       >
                         <CartesianGrid
                           strokeDasharray="3 3"
@@ -1358,6 +1359,14 @@ export default function WorkspacePage() {
                             strokeWidth: 2,
                             stroke: "white",
                           }}
+                        />
+                        <RangeMeasure
+                          data={chartData}
+                          xKey="block"
+                          yKey="price"
+                          color="#006DAE"
+                          formatX={(d) => blockToTime(d.block)}
+                          formatPrice={(v) => `₹${v.toFixed(3)}`}
                         />
                       </AreaChart>
                     </ResponsiveContainer>

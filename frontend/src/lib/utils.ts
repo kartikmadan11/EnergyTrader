@@ -19,6 +19,14 @@ export function newSessionId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** A YYYY-MM-DD date as day and month, e.g. "21 Oct". */
+export function shortDate(date: string): string {
+  const [, month, day] = date.split("-").map(Number);
+  return `${day} ${MONTHS[month - 1]}`;
+}
+
 export function blockToTime(block: number): string {
   const totalMinutes = (block - 1) * 15;
   const hours = Math.floor(totalMinutes / 60);

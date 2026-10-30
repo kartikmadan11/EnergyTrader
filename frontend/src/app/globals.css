@@ -119,3 +119,10 @@
 .recharts-wrapper g:focus {
   outline: none;
 }
+
+/* While a drag-to-measure is on screen, it stands in for the hover tooltip, cursor and dot.
+   Recharts sets the tooltip's visibility inline, which only !important outranks. */
+.recharts-wrapper[data-measuring]
+  :is(.recharts-tooltip-wrapper, .recharts-tooltip-cursor, .recharts-active-dot) {
+  visibility: hidden !important;
+}
