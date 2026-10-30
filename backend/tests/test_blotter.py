@@ -138,6 +138,13 @@ def test_a_partly_published_day_is_partial(client, seed):
     assert (row["status"], row["priced_blocks"], row["cleared_blocks"]) == ("partial", 48, 48)
 
 
+def test_a_partly_published_day_with_nothing_cleared_is_not_cleared(client, seed):
+    seed(*_session(1, price=5.0), *_prices(5.5, blocks=range(1, 49)))
+    (row,) = _rows(client)
+    assert (row["status"], row["priced_blocks"], row["cleared_blocks"]) == ("not_cleared", 48, 0)
+    assert row["fill_pct"] == 0
+
+
 def test_prices_for_another_segment_do_not_clear_a_session(client, seed):
     seed(*_session(1, price=6.0), *_prices(5.5, segment="RTM"))
     assert _rows(client)[0]["status"] == "pending"

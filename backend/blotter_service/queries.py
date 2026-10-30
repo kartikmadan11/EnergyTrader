@@ -123,13 +123,12 @@ def _sessions(filters: BlotterFilters, session_id: str | None = None):
         .group_by(legs.c.session_id)
         .subquery("agg")
     )
+    # Once any price is out, the status says what has cleared so far, so a session whose
+    # priced blocks all missed reads not_cleared even while later blocks await a price.
     status = case(
         (agg.c.priced_blocks == 0, "pending"),
         (agg.c.cleared_blocks == agg.c.block_count, "cleared"),
-        (
-            and_(agg.c.cleared_blocks == 0, agg.c.priced_blocks == agg.c.block_count),
-            "not_cleared",
-        ),
+        (agg.c.cleared_blocks == 0, "not_cleared"),
         else_="partial",
     )
     fill = case(
