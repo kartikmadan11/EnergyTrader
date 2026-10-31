@@ -72,3 +72,57 @@
 .header-gradient {
   background: linear-gradient(90deg, #006DAE 0%, #005A91 60%, #003F6B 100%);
 }
+
+/* Blotter rows that arrived since the last refresh fade from a teal wash. */
+@keyframes row-arrive {
+  from {
+    background-color: rgb(0 179 152 / 0.14);
+  }
+}
+
+.row-arrive {
+  animation: row-arrive 2.4s ease-out;
+}
+
+/* Side panels slide in from the right edge. */
+@keyframes drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+.drawer-in {
+  animation: drawer-in 180ms ease-out;
+}
+
+.drawer-in::backdrop {
+  animation: backdrop-in 180ms ease-out;
+}
+
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-arrive,
+  .drawer-in,
+  .drawer-in::backdrop {
+    animation: none;
+  }
+}
+
+/* Recharts focuses an internal layer when a chart is clicked; only the chart surface itself
+   takes keyboard focus, and it keeps its focus ring. */
+.recharts-wrapper g:focus {
+  outline: none;
+}
+
+/* While a drag-to-measure is on screen, it stands in for the hover tooltip, cursor and dot.
+   Recharts sets the tooltip's visibility inline, which only !important outranks. */
+.recharts-wrapper[data-measuring]
+  :is(.recharts-tooltip-wrapper, .recharts-tooltip-cursor, .recharts-active-dot) {
+  visibility: hidden !important;
+}

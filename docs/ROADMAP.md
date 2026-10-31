@@ -1,6 +1,7 @@
 # Roadmap
 
-This document plans the next stage of EnergyTrader: a Rust trading core, a trade blotter, and a public landing page with authenticated access.
+This document plans the next stage of EnergyTrader: a Rust trading core, roles with four-eyes approval, and a blotter that updates live.
+The landing page, sign-in and a first blotter are delivered, and sections 4 and 5 record what was built and what remains.
 It also records known modeling issues that the new work should fix rather than carry forward.
 Each section states the decision, the reason for it, and how we will know it worked.
 
@@ -10,8 +11,12 @@ Each section states the decision, the reason for it, and how we will know it wor
 
 The backend is a single FastAPI process on Python 3.13 that owns everything: scrapers, feature engineering, per-segment gradient-boosted models, the bid LP, DSM policy, pre-trade checks, risk, audit and a nightly APScheduler pipeline.
 Storage is one SQLite file whose schema comes from `Base.metadata.create_all`, with no migrations.
-There is no authentication, and every audit entry records the user as `trader` (`backend/common/models.py`).
+The web app signs people in with Auth.js through Sign in with Vercel or GitHub and admits only the accounts that `AUTH_ALLOWED_USERS` lists (`docs/AUTH.md`).
+Its proxy attaches a 60-second signed token naming the user to every API call, and the API rejects calls without one (`backend/common/auth.py`).
+Audit entries name the signed-in user, while rows written before sign-in existed show `trader`.
+Every signed-in user has the same permissions, because there are no roles yet.
 Submitting a bid set writes rows to the `bids` table with status `submitted` and an audit entry; nothing is sent to an exchange.
+The blotter lists every submitted session and derives how much of it cleared from published prices.
 Model training runs inside the API process, so a long retrain competes with interactive requests.
 
 A walk-forward backtest over 1 to 28 October 2026 gives a MAPE of 13.8% for DAM, 28.4% for RTM and 14.6% for TAM, with R² of 0.88, 0.70 and 0.05.
@@ -20,8 +25,8 @@ Eleven of those 28 days fall inside the training window, so these figures are op
 ### Goals
 
 1. Make the bid lifecycle correct by construction: typed units, decimal money, an explicit state machine, and an append-only record of who did what.
-2. Give traders and risk one blotter that shows every order, its status and its outcome, updated live.
-3. Put the workstation behind login with roles and four-eyes approval, so the audit trail names real people.
+2. Extend the blotter from bid sessions to every order, with its status, outcome and cost, updated live.
+3. Add roles and four-eyes approval on top of sign-in, so what a person can do depends on their role and nobody approves their own bids.
 4. Fix the buy-side modeling issues in section 2 before anyone relies on the recommendations.
 
 ### Non-goals
@@ -74,7 +79,7 @@ Once quantile forecasts exist (2.3), the same model becomes a scenario LP, and a
 
 ### 2.2 Demand is a daily total split evenly over blocks
 
-The optimizer sets `load_per_block = demand_mw / NUM_BLOCKS`, and the workstation labels the input "Total Demand" with a default of 500 (`frontend/src/app/page.tsx`).
+The optimizer sets `load_per_block = demand_mw / NUM_BLOCKS`, and the workstation labels the input "Total Demand" with a default of 500 (`frontend/src/app/(app)/workstation/page.tsx`).
 MW is a rate, so a 500 MW load needs 500 MW in every block, not 5.2 MW, and summing MW across blocks has no physical meaning.
 The replacement is a per-block load schedule in MW, either from a load forecast produced by the forecast service or uploaded as 96 values.
 The schedule is stored with the bid set, so validation, checks, risk and post-market review all measure deviation against the same baseline.
@@ -141,21 +146,22 @@ PyO3 remains the right tool if a numeric kernel inside forecasting ever needs to
 
 ```mermaid
 flowchart LR
-    browser[Browser] -->|HTTPS, one origin| proxy[Reverse proxy]
-    proxy -->|/ and /app| web[Next.js]
-    proxy -->|/api and /ws| core[et-api<br/>Rust, axum]
-    web -->|server-side fetches| core
+    browser[Browser] -->|HTTPS: pages and /api| web[Next.js<br/>Auth.js]
+    web -->|/api with a signed token| core[et-api<br/>Rust, axum]
+    browser -->|/ws with a one-time ticket| core
     core -->|unmigrated routes,<br/>on-demand forecasts| fc[Forecast service<br/>Python, FastAPI]
     worker[Forecast worker<br/>nightly pipeline] --> db[(PostgreSQL)]
     core --> db
     fc --> db
 ```
 
-`et-api` is the only upstream for `/api`, so it acts as the strangler-fig facade.
-It authenticates every request, serves the routes it owns, and forwards the rest to the forecast service with the authenticated actor in an internal header.
+The browser talks to the web app for pages and `/api`, and the web app forwards `/api` to `BACKEND_URL` with the signed token it already sends the Python API today (5.2).
+Pointing `BACKEND_URL` at `et-api` instead of the forecast service is the only change the web app needs.
+`et-api` is then the only upstream for `/api`, so it acts as the strangler-fig facade.
+It verifies the token on every request, serves the routes it owns, and forwards the rest to the forecast service with the actor in an internal header.
 The forecast service listens only on the private network and accepts requests only with the internal service token.
-Routing at the facade keeps auth in one place, leaves the Next.js config unchanged at each cutover, and guarantees that Python never sees an unauthenticated request.
-In local development without the proxy, the existing Next.js rewrite sends `/api` to `et-api`, and the browser opens the WebSocket against `et-api` directly.
+Routing at the facade keeps the token check in one place, leaves the web app unchanged at each cutover, and guarantees that Python never sees an unauthenticated request.
+The WebSocket is the one connection that skips the web app, because serverless hosting cannot hold a long-lived connection open; 5.10 covers how it is authenticated.
 
 ### 3.4 Crate layout
 
@@ -169,7 +175,7 @@ The Rust code lives in a Cargo workspace under `crates/`, next to `backend/` (th
 | `et-optimizer` | LP formulations, strategy versions, rounding to tick and lot | `et-domain`, `et-policy` | `good_lp` with the HiGHS backend |
 | `et-clearing` | Clearing simulator over recorded prices, curve evaluation, strategy backtests | `et-domain`, `et-policy` | none |
 | `et-store` | Postgres access, event store, projections, forecast contract reads | `et-domain` | `sqlx` |
-| `et-api` | HTTP and WebSocket API, auth, sessions, authorization, facade proxy, OpenAPI | all of the above | `axum`, `tokio`, `tower-http`, `reqwest`, `argon2`, `utoipa`, `tracing` |
+| `et-api` | HTTP and WebSocket API, token verification, roles and authorization, facade proxy, OpenAPI | all of the above | `axum`, `tokio`, `tower-http`, `reqwest`, `hmac`, `sha2`, `utoipa`, `tracing` |
 
 Only `et-store` and `et-api` perform I/O, so the domain, policy, risk, optimizer and clearing crates are deterministic and property-testable.
 
@@ -254,7 +260,11 @@ The existing `bids` and `audit_log` rows are imported once as `Imported.v1` even
 | Bid optimization | `bid_engine_service/optimizer.py` | `et-optimizer`, parity first, then 2.1 |
 | Submission and lifecycle | `bid_engine_service/router.py` | `et-api` and `et-store` |
 | Audit log and post-market review | `audit_service/router.py` | `et-api` and `et-clearing` |
-| Auth, sessions, blotter, WebSocket | none | `et-api` |
+| Sign-in and sessions | Auth.js in the web app | stays in the web app |
+| API token verification | `common/auth.py` | `et-api` |
+| Roles and authorization | none | `et-api` |
+| Blotter | `blotter_service/` | `et-api` and `et-store` |
+| WebSocket | none | `et-api` |
 | Scrapers, enrichment, training, prediction, backtest | Python | stays in the forecast service |
 | Nightly pipeline | APScheduler inside the API process | stays in Python, as a separate worker process |
 
@@ -287,7 +297,7 @@ This replaces the handwritten types in `frontend/src/lib/api.ts`, which can drif
 The order is read-only routes first (policy list, active and compare, audit log), then validation, risk and pre-trade checks, then submission, where the event store and four-eyes approval start.
 After that comes the optimizer (`recommend`, `tune` and `compare-strategies`), then post-market review.
 
-## 4. Trade blotter
+## 4. Blotter
 
 ### 4.1 Purpose
 
@@ -296,7 +306,8 @@ Traders use it to watch live sessions, risk uses it to review approvals and expo
 
 ### 4.2 Row model
 
-A row is one order, which is one block of one bid set, and the UI groups rows by bid set.
+In the target model a row is one order, which is one block of one bid set, and the UI groups rows by bid set.
+The blotter delivered so far has one row per bid set, with its orders in the detail panel (4.3).
 
 | Field | Meaning |
 | --- | --- |
@@ -322,17 +333,33 @@ The benchmark is configurable, and a positive value means day-ahead procurement 
 
 ### 4.3 Where rows come from
 
-In phase 2, before the event store exists, a `blotter_v1` view joins `bids`, the submit entries in `audit_log`, cleared prices from `price_history`, the latest forecast before submission, and `risk_snapshots`.
-Clearing status in that view is derived as bid price at least the MCP, `approved_by` is empty, and rows submitted before login existed show the actor as `imported`.
+Phase 2 is delivered without a database view.
+`blotter_service/queries.py` aggregates `bids` per session in SQL, joined to cleared prices from `price_history` and the submit entries in `audit_log`, so filters, sorting and totals run over the whole book rather than a loaded page.
+A block clears when its bid price is at least the MCP.
+A session is pending until any of its blocks is priced, and is then cleared, partial or not cleared by what has cleared so far.
+A unique index on `bids (session_id, block)` keeps a session from being submitted twice.
+Sessions submitted before sign-in existed show the actor as `trader`, and there is no `approved_by` until four-eyes approval exists.
+
+Still planned for the per-order model are the forecast at submission, slippage, the DSM fields, and cost against a benchmark.
+They need the forecast run and risk snapshot a bid set was checked against to be stored with it, which the event store provides.
 In phase 3, `et-store` maintains `blotter_rows` as a projection inside the append transaction, with the same API shape, so the UI does not change.
 
 ### 4.4 API
 
-- `GET /api/blotter` filters by delivery date range, segment, status, trader, verdict, bid set and free text, with a fixed set of sort keys.
-  It returns `{ rows, next_cursor, as_of_event_id, totals }` with keyset pagination on the sort key plus `order_id`, encoded as an opaque cursor, and a limit of at most 500.
-  Offsets are not supported, because they skip or repeat rows while new orders arrive.
-- `GET /api/blotter/{order_id}` returns the row with its event history, the check results it was approved on, and the forecast and clearing context for its block.
-- `GET /api/blotter/export.csv` takes the same filters and streams the whole result, with units in the column names and timestamps in both UTC ISO 8601 and IST.
+Delivered:
+
+- `GET /api/blotter` filters by delivery date range, segment, strategy, status, submitting user and session id prefix, and sorts by submission time, delivery date, volume, value or fill.
+  It returns `{ rows, next_cursor, totals }` with keyset pagination on the sort key plus a per-session sequence, encoded as an opaque cursor, and a limit of at most 500.
+  Totals cover every matching session, not only the returned page.
+  Offsets are not supported, because they skip or repeat rows while new sessions arrive.
+- `GET /api/blotter/{session_id}` returns the session with its block bids against the clearing price and its audit trail.
+- `GET /api/blotter/export` takes the same filters and returns up to 10,000 sessions as CSV, with units in the column names and submission times in UTC ISO 8601.
+
+Planned:
+
+- The list response gains `as_of_event_id`, and rows and their cursor move from sessions to orders.
+- The detail endpoint adds the check results a bid set was approved on and the forecast context for each block.
+- The export streams the whole result instead of stopping at a cap, with timestamps in both UTC and IST.
 - `WS /ws/blotter` starts with the client sending `{ "type": "subscribe", "filters": ..., "since": <as_of_event_id> }`.
   The server replays any matching events after `since` from the event table, then streams `upsert` messages tagged with `event_id`, plus a heartbeat every 15 seconds.
   The client drops messages it has already applied, so a REST snapshot followed by a subscription never misses or double-counts an update.
@@ -340,16 +367,25 @@ In phase 3, `et-store` maintains `blotter_rows` as a projection inside the appen
 
 ### 4.5 UI
 
-- The blotter lives at `/app/blotter` and uses the full content width with a sticky header, a sticky identifier column, 28-pixel rows, tabular numerals and right-aligned numbers.
+Delivered at `/blotter`:
+
+- The table uses the full content width with tabular numerals and right-aligned numbers, and loads 50 sessions at a time up to 500.
+- Filters live in the URL query string, and so does the open session (`?session=`), so a filtered view or a single session can be shared or bookmarked.
+- The page polls every 15 seconds while live, can be paused, and highlights sessions that arrive since the last refresh.
+- Selecting a row opens a side panel with the session's facts, its bids against the clearing price block by block, and its audit trail with actor and IST time.
+- CSV export downloads the current filter, not just the loaded page.
+- `Enter` opens the focused row, `j` and `k` step through sessions while the panel is open, and `Esc` closes it.
+
+Planned, with rows moving to orders at the same URL:
+
+- A sticky header and identifier column, and 28-pixel rows.
 - Rendering uses TanStack Table and TanStack Virtual; both are headless and small, and hand-rolling virtualization with grouping and sticky columns would be substantially worse.
 - A column chooser controls visibility and order, saved per user on the server so it follows them between machines.
-- Filters live in the URL query string, so a filtered view can be shared or bookmarked.
 - Grouping by bid set shows an aggregate row with block range, energy, volume-weighted clearing price and a status rollup, and it expands to the orders.
-- Live updates flash the changed cells briefly without shifting layout.
+- Live updates over the WebSocket replace polling and flash the changed cells briefly without shifting layout.
   While the user is scrolled away from the top or has a row focused, new rows are held behind an "N new updates" pill instead of reordering under the cursor.
-- Selecting a row opens a side panel with the event timeline (actor and IST time), the check results at approval, a forecast versus bid versus clearing chart for that block, and the risk snapshot.
-- CSV export downloads the current filter, not just the loaded page.
-- Arrow keys or `j` and `k` move between rows, `Enter` opens the panel, `Esc` closes it, `/` focuses search, and `?` lists shortcuts.
+- The side panel adds the check results at approval, a forecast versus bid versus clearing chart for each block, and the risk snapshot.
+- Arrow keys and `j` and `k` move between rows in the table itself, `/` focuses search, and `?` lists shortcuts.
 - The table uses `role="grid"` with `aria-rowcount` and `aria-rowindex`, so screen readers handle the virtualized rows.
 - The status bar shows the WebSocket state and the time of the last update, and a stale-data banner appears if the connection drops.
 
@@ -367,65 +403,75 @@ Three segments, 96 blocks and a few bid sets per day come to about 300 thousand 
 
 ## 5. Landing page and authenticated access
 
+Routes, the proxy, accounts, sessions and named audit actors (5.1 to 5.4 and 5.9) are delivered, and [AUTH.md](AUTH.md) covers their setup and deployment.
+CSRF hardening, rate limits, roles, four-eyes approval and the authenticated WebSocket are planned.
+
 ### 5.1 Routes
 
-The public landing page is `/`, sign-in is `/login`, and the workstation moves under `/app`.
-Today's `/`, `/forecast`, `/risk`, `/sync`, `/backtest`, `/analysis` and `/policy` move to `/app/...`, with permanent redirects from the old paths, like the existing `/bids` redirect in `frontend/next.config.js`.
-A path prefix gives the middleware a single matcher, lets the landing page render statically, and removes any list of public routes to keep in sync.
-Next.js route groups were considered, but they do not change URLs, so the middleware would need a per-route list.
+The public landing page is `/`, sign-in is `/login`, and every app page lives in an `(app)` route group at URLs such as `/workstation` and `/blotter`.
+`frontend/src/proxy.ts` denies by default: only `/` and `/login` are public, so a new page is protected without anyone adding it to a list.
+That gives the safety the planned `/app` prefix was meant to give, without moving every URL, and a list of two public pages is small enough to review at a glance.
+The `(app)` layout checks the session again, so a page is never served on the strength of the proxy alone.
+`/bids` still redirects permanently to `/workstation`.
 
-The landing page states what the product does, walks through the workflow (forecast, optimize, check, approve, submit, review) with screenshots from `docs/screenshots`, states that it does not route orders to an exchange, and offers a sign-in button.
-It loads no third-party scripts or trackers, and it quotes only accuracy figures from held-out backtests.
+The landing page states what the product does, walks through the workflow from forecast to review, states that it does not connect to an exchange, and offers sign-in.
+It loads no third-party scripts or trackers, and it quotes no accuracy figures.
 
-### 5.2 Middleware
+### 5.2 Proxy
 
-Next.js middleware on `/app/:path*` checks only that the session cookie is present, and redirects to `/login?next=<path>` when it is not.
-It does not validate the session, because `et-api` validates every API call and returns `401`, which the API client turns into the same redirect.
-The `next` parameter is honored only when it is a relative path starting with `/app/`, which prevents open redirects.
-Server components that fetch data forward the cookie to `et-api`.
+The proxy validates the Auth.js session on every page and `/api` request, rather than only checking that a cookie is present.
+A page request without a session redirects to `/login?callbackUrl=<path>`, and an `/api` request gets a `401` that the API client turns into the same redirect.
+`callbackUrl` is honored only when it is a same-origin path other than `/login`; absolute, protocol-relative and backslash forms fall back to the workstation, which prevents open redirects.
+For `/api`, the proxy drops the browser's cookie and `Authorization` header and attaches a 60-second HS256 token naming the user, signed with `API_AUTH_SECRET`.
+The API checks the token's signature, algorithm, issuer, audience and expiry, with 30 seconds of clock leeway, so the browser never holds a credential for it.
 
-### 5.3 Accounts and passwords
+### 5.3 Accounts
 
-An admin creates accounts, and there is no self-signup.
-The first admin is created with an `et-api admin create` command that reads the password from standard input.
-Passwords are hashed with argon2id using the RustCrypto `argon2` crate, with at least the OWASP baseline of 19 MiB memory, two iterations and one lane, tuned to about 100 ms on production hardware.
-The PHC string stores the parameters, so they can be raised later and hashes upgraded on the next successful login.
-Passwords need at least 12 characters with no composition rules, following NIST SP 800-63B, and are rejected if they appear in a bundled list of common passwords.
-For an unknown account, the server verifies against a dummy hash so response time does not reveal whether the account exists, and every failure returns the same message.
-Password reset uses an admin-issued, single-use link token that is stored hashed and expires after 24 hours, so no email delivery is required.
+Sign-in uses OAuth and OpenID Connect through Auth.js, with Sign in with Vercel (OIDC with PKCE, state and nonce) and GitHub, so the platform stores no passwords.
+There is no self-signup and no user database.
+`AUTH_ALLOWED_USERS` lists the actor ids that may sign in, such as `github:desk-north`, or `vercel:*` to admit whoever the Vercel app lets sign in.
+With the Vercel app's Sign-In Access limited to team members, `vercel:*` admits exactly the team, and Vercel checks membership on every sign-in.
+An empty list admits nobody, so a deployment that forgets to set it fails closed.
+`next dev` adds a name-only sign-in for local work, which production builds do not register.
+
+The earlier plan for argon2id password accounts in `et-api` is dropped.
+Identity providers already handle credential storage, multi-factor authentication and account recovery, and doing them again would add risk without adding anything.
 
 ### 5.4 Sessions
 
-A session token is 256 random bits, base64url-encoded, and the database stores only its SHA-256 hash, so a database read does not yield usable sessions.
-The cookie is `__Host-et_session` with `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/` and no `Domain`.
-In local development over plain HTTP, one config flag drops the `__Host-` prefix and the `Secure` attribute.
-Every login creates a new session, which prevents session fixation, and a role or password change rotates it.
-A password change also revokes every other session for that user.
-Sessions expire after 60 minutes idle or 12 hours absolute, which covers a trading day and forces a fresh login each day.
-`last_seen_at` is written at most once a minute to avoid a database write on every request.
-Logout deletes the session row, and an admin can revoke all sessions for a user.
+A session is an encrypted Auth.js JWT in an `HttpOnly`, `SameSite=Lax` cookie, which is `Secure` and `__Secure-` prefixed over HTTPS.
+It ends 12 hours after sign-in however active it stays, which covers a trading day and forces a fresh sign-in each day.
+Every request that reads the session checks its account against `AUTH_ALLOWED_USERS` again, so removing an id signs that person out on their next request.
+Every sign-in issues a new cookie, which prevents session fixation.
+Rotating `AUTH_SECRET` ends every session at once.
+
+Still planned:
+
+- Revoking one person's session without changing the allowlist needs server-side state, such as a per-user `sessions_valid_after` timestamp in `et-api` that the token check compares with the session's sign-in time.
+- An idle timeout of 60 minutes, which needs the same state.
 
 ### 5.5 CSRF
 
-The defense is `SameSite=Lax`, an origin check on every state-changing request, and JSON-only request bodies, with no CSRF tokens.
+The defense is `SameSite=Lax`, an origin check on every state-changing request, and JSON-only request bodies, with no CSRF tokens on the API.
+The `SameSite=Lax` session cookie is delivered, and Auth.js protects its own sign-in and sign-out routes with a token of its own; the rest of this section is planned.
 `SameSite=Lax` keeps the cookie off cross-site `POST`, `PUT` and `DELETE` requests and off cross-site subresource requests.
 Lax still sends the cookie on top-level cross-site `GET` navigations, so `GET` handlers must not change state, and a test walks the router to enforce that.
-Sibling subdomains count as same-site, so `et-api` also requires `Origin`, or `Sec-Fetch-Site: same-origin`, to match the configured public origin on every request other than `GET` and `HEAD`, and rejects the request when both headers are missing.
-Mutating endpoints accept only `application/json`, which a cross-origin form cannot send without a preflight, and `et-api` allows no cross-origin requests.
+Sibling subdomains count as same-site, so the web app's proxy will also require `Origin`, or `Sec-Fetch-Site: same-origin`, to match the public origin on every `/api` request other than `GET` and `HEAD`, and reject the request when both headers are missing.
+Mutating endpoints will accept only `application/json`, which a cross-origin form cannot send without a preflight, and `et-api` allows no cross-origin requests.
 Double-submit tokens add a round trip without covering any case the origin check misses in a single-origin deployment, so they are deferred until the API is ever served cross-origin.
 
-### 5.6 Rate limiting and lockout
+### 5.6 Rate limiting
 
-Login attempts are limited per IP with a token bucket of 10 per minute, and failures are counted per account.
-After 5 consecutive failures the account is locked with exponential backoff from 1 minute up to 30 minutes, rather than permanently, so nobody can lock a trader out before gate closure.
-Counters live in Postgres, so they survive restarts and are shared across instances, and a successful login resets them.
-Expensive endpoints such as tuning, training and backtests have per-session limits that protect the solver and model workers.
-Login success and failure, lockout, logout, password changes and role changes are all audit events.
+Password guessing and account lockout are the identity provider's concern, because the platform has no passwords.
+Expensive endpoints such as tuning, training and backtests will have per-user limits that protect the solver and model workers.
+The counters live in Postgres, so they survive restarts and are shared across instances.
+Sign-in, refused sign-in, sign-out and role changes will all be audit events.
 
 ### 5.7 Roles and authorization
 
 There are four roles: `viewer`, `trader`, `risk` and `admin`, and a user can hold more than one.
 `admin` manages users and the system and grants no trading rights, which keeps duties separate.
+`et-api` stores roles against actor ids, and the web app's token carries only the identity, so a role change takes effect on the next request without anyone signing in again.
 
 | Action | viewer | trader | risk | admin |
 | --- | --- | --- | --- | --- |
@@ -453,23 +499,29 @@ Below the threshold, approval is automatic and recorded as an `AutoApproved` eve
 
 ### 5.9 Audit actor
 
-Every event records `actor_kind` and `actor_id`, and system work such as the nightly pipeline runs as a named system principal, never as a null actor.
+Audit entries already record the signed-in user's actor id, `<provider>:<username>`, from the API token, and the nightly pipeline records itself as `scheduler`.
+An API running without `API_AUTH_SECRET` records every caller as `local`.
+
+Still planned: every event records `actor_kind` and `actor_id`, and system work runs as a named system principal, never as a null actor.
 Requests forwarded to the forecast service carry the actor in an internal header set by `et-api`, and the facade strips any copy of that header from inbound requests.
 The `trader` default on `audit_log.user` goes away.
 
 ### 5.10 Authenticated WebSocket
 
-The browser sends the session cookie with the upgrade request, and `et-api` validates the session and role before upgrading.
+The WebSocket connects to `et-api` directly (3.3), where the web app's session cookie is neither sent nor readable, so it authenticates with a ticket instead.
+The client first calls `POST /api/ws/ticket`, which goes through the proxy like any API call, and `et-api` answers with a random ticket bound to the actor that is valid once, for 30 seconds.
+The client then opens `/ws/blotter?ticket=...`, and `et-api` redeems the ticket and checks the role before upgrading.
+A ticket in a URL can end up in access logs, which is why it is single-use and short-lived.
 The `Origin` header is checked against the allow-list on upgrade, because WebSockets are not covered by CORS and would otherwise be open to cross-site hijacking.
-The connection is bound to its session, and `et-api` closes it with code 4401 when the session expires or is revoked, with revocation delivered over `LISTEN/NOTIFY`.
-The client then redirects to `/login`.
+`et-api` closes the connection with code 4401 when the actor's access is revoked, with revocation delivered over `LISTEN/NOTIFY`.
+The client then asks for a new ticket, which redirects to `/login` if the session has ended.
 
-### 5.11 Where auth lives and SSO later
+### 5.11 Where auth lives
 
-`et-api` owns users, sessions and authorization.
-Next.js middleware only checks that the cookie is present and forwards it, and the forecast service trusts only `et-api` over the private network.
-Single sign-on can come later through OIDC with the authorization code flow and PKCE, mapping identity-provider groups to roles.
-Local password accounts then remain only as a break-glass admin.
+The web app owns sign-in and sessions through Auth.js, and the API trusts only the signed token its proxy attaches.
+`et-api` will own roles, authorization and revocation, keyed by actor id, and the forecast service trusts only `et-api` over the private network.
+Moving sign-in into `et-api` was considered and rejected: Auth.js already implements OIDC correctly on the host the web app runs on, and the token boundary keeps browser sessions out of the API entirely.
+Corporate single sign-on is one more OIDC provider in `frontend/src/auth.ts`, such as Microsoft Entra ID or Okta, with identity-provider groups mapped to roles.
 
 ## 6. Delivery plan
 
@@ -477,13 +529,14 @@ Sizes assume one engineer working full time.
 
 | Phase | Scope | Exit criteria | Size |
 | --- | --- | --- | --- |
-| 1. Foundations | Postgres with SQL migrations and a one-off SQLite import; `et-api` skeleton as a pass-through facade; users, sessions, roles and login; landing page, `/login` and the `/app` move; actors on audit entries; Docker Compose | Every current workflow passes an end-to-end test behind login; the forecast service is reachable only from `et-api`; imported row counts reconcile; CI runs migrations and both test suites against Postgres | 3 to 4 weeks |
-| 2. Blotter on existing data | `blotter_v1` view, list, detail and CSV endpoints, the blotter UI with 10-second polling | All historical bid sets appear with derived clearing status; performance targets hold on 300 thousand seeded orders; keyboard and accessibility checks pass | 2 weeks |
-| 3. Rust core | `et-domain`, `et-policy` with immutable versions, `et-risk`, `et-store` and the event store; parity fixtures and route-by-route cutover; lifecycle and four-eyes approval; the WebSocket blotter; optimizer parity | Python policy, approval, risk and bid routers are deleted; the parity suite and property tests pass in CI; four-eyes approval is enforced; WebSocket targets are met | 6 to 8 weeks |
+| 1. Foundations | Delivered: sign-in with Vercel and GitHub, the signed API token, the landing page and `/login`, and named actors on audit entries. Remaining: Postgres with SQL migrations and a one-off SQLite import; `et-api` skeleton as a pass-through facade that verifies the token; roles; Docker Compose | Every current workflow passes an end-to-end test behind sign-in; the forecast service is reachable only from `et-api`; imported row counts reconcile; CI runs migrations and both test suites against Postgres | 2 to 3 weeks remaining |
+| 2. Blotter on existing data | Delivered: session rows from SQL aggregates over existing tables, list, detail and CSV endpoints, and the blotter UI with 15-second polling | All historical bid sets appear with derived clearing status; filters, totals and paging are covered by API tests | Delivered |
+| 3. Rust core | `et-domain`, `et-policy` with immutable versions, `et-risk`, `et-store` and the event store; parity fixtures and route-by-route cutover; lifecycle and four-eyes approval; order-level blotter rows with benchmark cost; the WebSocket blotter; optimizer parity | Python policy, approval, risk and bid routers are deleted; the parity suite and property tests pass in CI; four-eyes approval is enforced; the blotter targets in 4.6 hold on 300 thousand seeded orders; keyboard and accessibility checks pass | 6 to 8 weeks |
 | 4. Modeling | Buyer LP and per-block load schedule as a new strategy version; quantile intervals with conformal calibration; scenario risk; strategy backtests through `et-clearing` | Over at least 90 walk-forward delivery days, the new formulation costs less in procurement, RTM cover and DSM than the current one at equal or lower CVaR; 95% intervals cover 92 to 98% of held-out outcomes; the old formulation is retired | 4 to 6 weeks |
 | 5. Market access | Bid curves and block bids in the optimizer and UI; bid areas and area prices; order routing through an exchange member; reconciliation with exchange obligation reports; settlement | Defined once exchange access is arranged | Not sized |
 
-Phase 2 reads existing tables only, so it can run alongside the early, pure-crate part of phase 3.
+Phase 2 read existing tables only, which is why it could ship before phase 1's move to Postgres.
+The order-level blotter moved into phase 3, because the forecast and risk context it reports is only stored once bid sets are event-sourced.
 Phase 5 depends on a commercial relationship with an exchange member as much as on engineering.
 
 ## 7. Testing and operations
@@ -506,15 +559,16 @@ Phase 5 depends on a commercial relationship with an exchange member as much as 
 Services log structured JSON through `tracing` on the Rust side and the standard logging module on the Python side, with a request ID on every line.
 W3C `traceparent` headers propagate from Next.js through `et-api` to the forecast service, and traces and metrics export over OTLP to an OpenTelemetry collector.
 Key metrics are latency and errors per route, solver time and status, how often the uniform fallback is used, verdict counts, WebSocket connections and send lag, event append rate, and forecast freshness per segment.
-Alerts fire when no forecast for the next delivery day has been published a configured time before gate closure, when a nightly job fails, when the solver falls back, and when login failures spike.
+Alerts fire when no forecast for the next delivery day has been published a configured time before gate closure, when a nightly job fails, when the solver falls back, and when refused sign-ins or rejected API tokens spike.
 `/healthz` reports liveness, and `/readyz` checks the database, the migration version and the forecast service.
 
 ### 7.3 Deployment
 
 `et-api` builds in a multi-stage Dockerfile with `cargo-chef` layer caching onto a distroless runtime image.
-The forecast service and its worker build on a slim Python image with `uv`, and the web app uses Next.js standalone output.
+The forecast service and its worker build on a slim Python image with `uv`.
+The web app deploys to Vercel as described in [AUTH.md](AUTH.md), and builds as Next.js standalone output for local containers.
 Migrations run as a one-shot job before the services start.
-`docker-compose.yml` runs Postgres, migrations, `et-api`, the forecast service, the forecast worker, the web app and the reverse proxy locally, and `make dev` remains the entry point.
+`docker-compose.yml` runs Postgres, migrations, `et-api`, the forecast service, the forecast worker and the web app locally, and `make dev` remains the entry point.
 The nightly pipeline moves out of the API process into the forecast worker.
 Any hosted environment is defined as code, and secrets come from the environment or a secret manager, never from images.
 Postgres uses WAL archiving for point-in-time recovery, because the event store is the system of record, and a scheduled job proves that a restore works.
@@ -526,6 +580,8 @@ Postgres uses WAL archiving for point-in-time recovery, because the event store 
 2. Where does the per-block load schedule come from: an internal load forecast, the utility's own schedule, or uploads?
 3. Which markets come first: IEX only, or other exchanges as well, and should TAM stay in the optimizer given its forecast accuracy?
 4. Should RTM be optimized per half-hourly auction rather than as a day of 96 blocks?
-5. What are the four-eyes threshold and the session lifetimes the desk will accept?
-6. What hosting target and identity provider should phase 1 assume?
+5. What four-eyes threshold will the desk accept?
+   Sessions last 12 hours from sign-in; whether the desk also wants an idle timeout is open.
+6. Answered: the web app runs on Vercel with Sign in with Vercel or GitHub, and the API runs on a container host or virtual machine behind HTTPS.
+   Whether a corporate identity provider replaces them depends on who the primary user is (question 1).
 7. How long must events and market data be retained for regulatory record keeping?

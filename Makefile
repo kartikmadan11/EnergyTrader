@@ -20,6 +20,7 @@ web:
 
 test:
 	uv run --directory backend pytest
+	npm test --prefix frontend
 
 lint:
 	uv run --directory backend ruff check .

@@ -22,9 +22,10 @@ import {
   type BacktestDay,
   type BacktestResult,
 } from "@/lib/api";
-import { SEGMENTS, blockToTime, mapeGrade, marketDate } from "@/lib/utils";
+import { SEGMENTS, blockToTime, mapeGrade, marketDate, shortDate } from "@/lib/utils";
 import Spinner from "@/components/Spinner";
 import PageHeader from "@/components/PageHeader";
+import RangeMeasure, { MEASURE_MARGIN_TOP } from "@/components/RangeMeasure";
 
 const TOOLTIP_STYLE = {
   background: "#ffffff",
@@ -306,8 +307,8 @@ export default function BacktestPage() {
                 data={result.daily.map((d) => ({ ...d, error: dayError(d).value }))}
                 margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
                 onClick={(e) => {
-                  const date = e?.activePayload?.[0]?.payload?.date;
-                  if (date) setSelectedDate(date);
+                  // The active label is the clicked bar's x value, the date.
+                  if (typeof e.activeLabel === "string") setSelectedDate(e.activeLabel);
                 }}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
@@ -321,8 +322,8 @@ export default function BacktestPage() {
                 <Tooltip
                   cursor={{ fill: "#F1F5F9" }}
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number, _n, item) => [
-                    `${v.toFixed(2)}%`,
+                  formatter={(v, _n, item) => [
+                    `${Number(v).toFixed(2)}%`,
                     `${dayError(item.payload).metric} (${SPLIT_LABEL[item.payload.data_split as BacktestDay["data_split"]]})`,
                   ]}
                 />
@@ -355,8 +356,11 @@ export default function BacktestPage() {
             <h2 className="text-sm font-semibold mb-4 text-gray-700">
               Daily Average Price · Forecast vs Actual
             </h2>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={result.daily} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+            <ResponsiveContainer width="100%" height={240}>
+              <LineChart
+                data={result.daily}
+                margin={{ top: MEASURE_MARGIN_TOP, right: 8, left: -10, bottom: 0 }}
+              >
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <XAxis
                   dataKey="date"
@@ -371,7 +375,7 @@ export default function BacktestPage() {
                 />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number) => `₹${v.toFixed(3)}/kWh`}
+                  formatter={(v) => `₹${Number(v).toFixed(3)}/kWh`}
                 />
                 <Legend wrapperStyle={{ fontSize: "12px" }} />
                 <Line
@@ -389,6 +393,14 @@ export default function BacktestPage() {
                   strokeWidth={2}
                   dot={false}
                   name="Forecast"
+                />
+                <RangeMeasure
+                  data={result.daily}
+                  xKey="date"
+                  yKey="avg_actual"
+                  color="#00B398"
+                  formatX={(d) => shortDate(d.date)}
+                  formatPrice={(v) => `₹${v.toFixed(3)}`}
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -425,8 +437,11 @@ export default function BacktestPage() {
               </select>
             </div>
             {selectedDay && (
-              <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={selectedDay.blocks} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart
+                  data={selectedDay.blocks}
+                  margin={{ top: MEASURE_MARGIN_TOP, right: 8, left: -10, bottom: 0 }}
+                >
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis
                     dataKey="block"
@@ -457,6 +472,14 @@ export default function BacktestPage() {
                     strokeWidth={1.5}
                     dot={false}
                     name="Forecast"
+                  />
+                  <RangeMeasure
+                    data={selectedDay.blocks}
+                    xKey="block"
+                    yKey="actual"
+                    color="#00B398"
+                    formatX={(d) => blockToTime(d.block)}
+                    formatPrice={(v) => `₹${v.toFixed(3)}`}
                   />
                 </LineChart>
               </ResponsiveContainer>
@@ -569,7 +592,7 @@ function ErrorDistribution({ result }: { result: BacktestResult }) {
           <Tooltip
             cursor={{ fill: "#F1F5F9" }}
             contentStyle={TOOLTIP_STYLE}
-            formatter={(v: number, name: string) => [`${v} blocks`, name]}
+            formatter={(v, name) => [`${v} blocks`, name]}
           />
           <Legend wrapperStyle={{ fontSize: "12px" }} />
           <Bar dataKey="tight" stackId="a" fill="#00B398" name={tiles[0].label} />

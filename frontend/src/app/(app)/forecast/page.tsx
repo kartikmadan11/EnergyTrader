@@ -162,15 +162,20 @@ export default function TrainingPage() {
   const [result, setResult] = useState<TrainResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Training data coverage
-  const [dataCoverage, setDataCoverage] = useState<{
-    dates: string[];
-    totalDays: number;
-    earliest: string;
-    latest: string;
-    dowCounts: Record<string, number>;
+  // Training data coverage, tagged with the segment it was loaded for, so switching segment
+  // shows the loading state until that segment's coverage arrives.
+  const [coverage, setCoverage] = useState<{
+    segment: string;
+    data: {
+      dates: string[];
+      totalDays: number;
+      earliest: string;
+      latest: string;
+      dowCounts: Record<string, number>;
+    } | null;
   } | null>(null);
-  const [coverageLoading, setCoverageLoading] = useState(false);
+  const coverageLoading = coverage?.segment !== segment;
+  const dataCoverage = coverage?.segment === segment ? coverage.data : null;
 
   // Enrichment status
   const [enrichStatus, setEnrichStatus] = useState<EnrichStatus | null>(null);
@@ -222,8 +227,7 @@ export default function TrainingPage() {
   };
 
   useEffect(() => {
-    setCoverageLoading(true);
-    setDataCoverage(null);
+    let current = true;
     getDataCoverage(segment)
       .then(({ dates }) => {
         const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -232,16 +236,22 @@ export default function TrainingPage() {
           const label = DOW[new Date(d + "T00:00:00").getDay()];
           dowCounts[label] = (dowCounts[label] ?? 0) + 1;
         }
-        setDataCoverage({
+        return {
           dates,
           totalDays: dates.length,
           earliest: dates[0] ?? "",
           latest: dates[dates.length - 1] ?? "",
           dowCounts,
-        });
+        };
       })
-      .catch(() => setDataCoverage(null))
-      .finally(() => setCoverageLoading(false));
+      .catch(() => null)
+      .then((data) => {
+        // Drop a response for a segment the user has already switched away from.
+        if (current) setCoverage({ segment, data });
+      });
+    return () => {
+      current = false;
+    };
   }, [segment]);
 
   const handleTrain = async () => {

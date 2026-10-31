@@ -19,8 +19,11 @@ import {
   getHealth,
   triggerScrape,
   errorMessage,
+  type DataHealth,
+  type SegmentHealth,
 } from "@/lib/api";
-import { blockToTime, marketDate } from "@/lib/utils";
+import { blockToTime, marketDate, shortDate } from "@/lib/utils";
+import RangeMeasure, { MEASURE_MARGIN_TOP } from "@/components/RangeMeasure";
 
 const SEGMENTS = ["DAM", "RTM", "TAM"] as const;
 type Segment = (typeof SEGMENTS)[number];
@@ -64,6 +67,8 @@ const SEGMENT_META: Record<
 
 interface ChartPoint {
   key: string;
+  date: string;
+  block: number;
   label: string;
   actual?: number;
   predicted?: number;
@@ -114,10 +119,10 @@ const CustomTooltip = ({
   );
 };
 
-interface ScrapeInfo {
-  latest_data: string | null;
-  row_count: number;
-}
+// Asking for the latest forecast of a segment that has none is a 404, so ask only when
+// the health summary says one exists.
+const hasForecast = (health: DataHealth | null, seg: Segment) =>
+  health?.segments[seg]?.latest_forecast != null;
 
 export default function MarketDataSyncPage() {
   const [fetchDays, setFetchDays] = useState<number>(14);
@@ -150,7 +155,7 @@ export default function MarketDataSyncPage() {
     TAM: false,
   });
   const [scrapeInfo, setScrapeInfo] = useState<
-    Record<Segment, ScrapeInfo | null>
+    Record<Segment, SegmentHealth | null>
   >({ DAM: null, RTM: null, TAM: null });
   const [scrapeError, setScrapeError] = useState<
     Record<Segment, string | null>
@@ -162,17 +167,17 @@ export default function MarketDataSyncPage() {
   });
   const [syncingAll, setSyncingAll] = useState(false);
 
-  const loadSegment = async (seg: Segment) => {
+  const loadSegment = async (seg: Segment, withForecast: boolean) => {
     setData((prev) => ({ ...prev, [seg]: { ...prev[seg], loaded: false } }));
     try {
       const [histRaw, forecastRaw] = await Promise.allSettled([
         getHistory(seg, 7),
-        getLatestForecast(seg),
+        withForecast ? getLatestForecast(seg) : Promise.resolve(null),
       ]);
 
       const histRows = histRaw.status === "fulfilled" ? histRaw.value : [];
       const forecast =
-        forecastRaw.status === "fulfilled" && forecastRaw.value.blocks.length
+        forecastRaw.status === "fulfilled" && forecastRaw.value?.blocks.length
           ? forecastRaw.value
           : null;
 
@@ -183,7 +188,7 @@ export default function MarketDataSyncPage() {
         const key = `${date}|${String(block).padStart(2, "0")}`;
         let p = byKey.get(key);
         if (!p) {
-          p = { key, label: `${date.slice(5)} ${blockToTime(block)}` };
+          p = { key, date, block, label: `${date.slice(5)} ${blockToTime(block)}` };
           byKey.set(key, p);
         }
         return p;
@@ -228,7 +233,7 @@ export default function MarketDataSyncPage() {
     }
   };
 
-  const loadCoverage = () =>
+  const loadCoverage = (): Promise<DataHealth | null> =>
     getHealth()
       .then((h) => {
         setScrapeInfo({
@@ -236,8 +241,9 @@ export default function MarketDataSyncPage() {
           RTM: h.segments.RTM ?? null,
           TAM: h.segments.TAM ?? null,
         });
+        return h;
       })
-      .catch(() => {});
+      .catch(() => null);
 
   const handleScrape = async (seg: Segment) => {
     setScraping((prev) => ({ ...prev, [seg]: true }));
@@ -264,7 +270,8 @@ export default function MarketDataSyncPage() {
           : `Sync failed: ${failures[0]}`,
       }));
     }
-    await Promise.all([loadCoverage(), synced ? loadSegment(seg) : null]);
+    const health = await loadCoverage();
+    if (synced) await loadSegment(seg, hasForecast(health, seg));
     setProgress((prev) => ({ ...prev, [seg]: null }));
     setScraping((prev) => ({ ...prev, [seg]: false }));
   };
@@ -278,8 +285,9 @@ export default function MarketDataSyncPage() {
   };
 
   useEffect(() => {
-    loadCoverage();
-    SEGMENTS.forEach((seg) => loadSegment(seg));
+    loadCoverage().then((health) =>
+      SEGMENTS.forEach((seg) => loadSegment(seg, hasForecast(health, seg))),
+    );
   }, []);
 
   return (
@@ -452,16 +460,16 @@ export default function MarketDataSyncPage() {
 
             {/* Chart or Empty State */}
             {!state.loaded ? (
-              <div className="h-52 bg-gray-50 animate-pulse rounded-lg flex items-center justify-center">
+              <div className="h-56 bg-gray-50 animate-pulse rounded-lg flex items-center justify-center">
                 <p className="text-xs text-gray-400">Loading {seg} data…</p>
               </div>
             ) : state.points.length > 0 ? (
               <div>
-                <div className="h-52">
+                <div className="h-56">
                   <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart
                       data={state.points}
-                      margin={{ top: 8, right: 12, bottom: 4, left: 4 }}
+                      margin={{ top: MEASURE_MARGIN_TOP, right: 12, bottom: 4, left: 4 }}
                     >
                       <defs>
                         <linearGradient id={`histGrad-${seg}`} x1="0" y1="0" x2="0" y2="1">
@@ -506,6 +514,14 @@ export default function MarketDataSyncPage() {
                           activeDot={{ r: 4, fill: meta.predColor, strokeWidth: 1.5, stroke: "white" }}
                         />
                       )}
+                      <RangeMeasure
+                        data={state.points}
+                        xKey="label"
+                        yKey="actual"
+                        color={meta.color}
+                        formatX={(p) => `${shortDate(p.date)} ${blockToTime(p.block)}`}
+                        formatPrice={(v) => `₹${v.toFixed(3)}`}
+                      />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>

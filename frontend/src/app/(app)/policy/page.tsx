@@ -105,8 +105,7 @@ function PolicyCard({
             )}
           </div>
           <p className="text-[11px] text-gray-500 mt-0.5">
-            Effective: {policy.effective_date} &nbsp;·&nbsp; ID:{" "}
-            <code className="font-mono text-gray-600">{policy.regulation_id}</code>
+            Effective: {policy.effective_date}
           </p>
         </div>
 
@@ -175,9 +174,6 @@ function ViewDrawer({
             <div className="flex items-center gap-2 mt-1">
               <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border uppercase tracking-wide ${badge}`}>
                 {policy.status}
-              </span>
-              <span className="text-[11px] text-gray-400">
-                ID: <code className="font-mono">{policy.regulation_id}</code>
               </span>
             </div>
           </div>

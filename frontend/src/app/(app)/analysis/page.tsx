@@ -30,8 +30,13 @@ import {
 } from "@/lib/utils";
 import Spinner from "@/components/Spinner";
 import PageHeader from "@/components/PageHeader";
+import RangeMeasure, { MEASURE_MARGIN_TOP } from "@/components/RangeMeasure";
 
 const AUDIT_LIMIT = 50;
+
+// An unreachable audit log shows as empty rather than failing the page.
+const latestAudit = (): Promise<AuditEntry[]> =>
+  getAuditLog(undefined, AUDIT_LIMIT).catch(() => []);
 
 const TOOLTIP_STYLE = {
   background: "#ffffff",
@@ -139,16 +144,18 @@ export default function AnalysisPage() {
   const [error, setError] = useState("");
 
   const loadAudit = useCallback(async () => {
-    try {
-      setAuditLog(await getAuditLog(undefined, AUDIT_LIMIT));
-    } catch {
-      setAuditLog([]);
-    }
+    setAuditLog(await latestAudit());
   }, []);
 
   useEffect(() => {
-    loadAudit();
-  }, [loadAudit]);
+    let current = true;
+    latestAudit().then((entries) => {
+      if (current) setAuditLog(entries);
+    });
+    return () => {
+      current = false;
+    };
+  }, []);
 
   const handleAnalyze = async () => {
     setLoading(true);
@@ -303,8 +310,11 @@ export default function AnalysisPage() {
                 </span>
               )}
             </div>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={comparison}>
+            <ResponsiveContainer width="100%" height={320}>
+              <LineChart
+                data={comparison}
+                margin={{ top: MEASURE_MARGIN_TOP, right: 5, bottom: 5, left: 5 }}
+              >
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <XAxis
                   dataKey="block"
@@ -320,7 +330,7 @@ export default function AnalysisPage() {
                 />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(val: number) => `₹${val.toFixed(3)}/kWh`}
+                  formatter={(val) => `₹${Number(val).toFixed(3)}/kWh`}
                   labelFormatter={(b) => `Block ${b} (${blockToTime(Number(b))})`}
                 />
                 <Legend wrapperStyle={{ fontSize: "12px" }} />
@@ -353,6 +363,14 @@ export default function AnalysisPage() {
                     connectNulls
                   />
                 )}
+                <RangeMeasure
+                  data={comparison}
+                  xKey="block"
+                  yKey="actual"
+                  color="#00B398"
+                  formatX={(d) => blockToTime(d.block)}
+                  formatPrice={(v) => `₹${v.toFixed(3)}`}
+                />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -381,7 +399,7 @@ export default function AnalysisPage() {
                   <Tooltip
                     cursor={{ fill: "#F1F5F9" }}
                     contentStyle={TOOLTIP_STYLE}
-                    formatter={(v: number) => `${v.toFixed(2)}%`}
+                    formatter={(v) => `${Number(v).toFixed(2)}%`}
                     labelFormatter={(b) => `Block ${b} (${blockToTime(Number(b))})`}
                   />
                   <Bar dataKey="error_pct" name="Error" radius={[2, 2, 0, 0]}>

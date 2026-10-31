@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.auth import Actor, current_actor
 from common.database import get_db
 from common.models import AuditLog
 from common.schemas import BidItem
@@ -27,6 +28,7 @@ async def request_approval(
     strategy: str = Query(default="balanced", pattern=r"^(conservative|balanced|aggressive)$"),
     bids: list[BidItem] = Body(...),
     db: AsyncSession = Depends(get_db),
+    actor: Actor = Depends(current_actor),
 ):
     """Run pre-trade checks on a bid set and return a scored verdict."""
     try:
@@ -39,7 +41,7 @@ async def request_approval(
     db.add(
         AuditLog(
             session_id=session_id,
-            user="system",
+            user=actor.id,
             action="pre_trade_check",
             entity_type="bid",
             details={

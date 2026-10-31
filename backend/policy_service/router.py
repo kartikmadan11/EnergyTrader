@@ -14,6 +14,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.auth import Actor, current_actor
 from common.database import get_db
 from common.dsm_policy import (
     DSMPolicy,
@@ -46,7 +47,11 @@ async def get_active() -> dict:
 
 
 @router.post("/activate/{regulation_id}")
-async def activate_policy(regulation_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+async def activate_policy(
+    regulation_id: str,
+    db: AsyncSession = Depends(get_db),
+    actor: Actor = Depends(current_actor),
+) -> dict:
     """
     Switch the active DSM policy.
 
@@ -61,6 +66,7 @@ async def activate_policy(regulation_id: str, db: AsyncSession = Depends(get_db)
 
     db.add(
         AuditLog(
+            user=actor.id,
             action="policy_activate",
             entity_type="policy",
             details={"from": previous, "to": regulation_id},
@@ -140,6 +146,7 @@ async def update_policy_endpoint(
     regulation_id: str,
     body: dict = Body(...),
     db: AsyncSession = Depends(get_db),
+    actor: Actor = Depends(current_actor),
 ) -> dict:
     """
     Edit an existing policy's parameters in place.
@@ -158,6 +165,7 @@ async def update_policy_endpoint(
     after = policy.model_dump()
     db.add(
         AuditLog(
+            user=actor.id,
             action="policy_update",
             entity_type="policy",
             details={

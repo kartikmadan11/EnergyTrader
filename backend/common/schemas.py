@@ -193,3 +193,74 @@ class PostMarketSummary(BaseModel):
     uncleared_dsm_exposure: float = Field(
         description="DSM charge if uncleared bid volume were drawn from the grid as deviation"
     )
+
+
+# ── Blotter ─────────────────────────────────────────────────────────────
+
+BlotterStatus = Literal["pending", "cleared", "partial", "not_cleared"]
+
+
+class BlotterRow(BaseModel):
+    """One submitted bid set, with clearing results once prices are published."""
+
+    session_id: str
+    submitted_at: datetime | None = Field(description="UTC")
+    submitted_by: str | None
+    target_date: str
+    segment: str
+    strategy: str
+    block_count: int
+    volume_mwh: float
+    avg_price: float = Field(description="Volume-weighted bid price, INR/kWh")
+    value_inr: float = Field(description="Bid price times volume")
+    overrides: int
+    verdict: str | None
+    score: float | None
+    status: BlotterStatus = Field(
+        description="pending until clearing prices exist, then cleared, partial or not_cleared"
+    )
+    priced_blocks: int = Field(description="Blocks with a published clearing price")
+    cleared_blocks: int
+    cleared_mwh: float
+    cleared_cost_inr: float = Field(description="Cleared volume at the clearing price")
+    fill_pct: float | None = Field(description="Cleared share of bid volume; null while pending")
+
+
+class BlotterTotals(BaseModel):
+    """Aggregates over every row matching the filters, not just the returned page."""
+
+    sessions: int
+    volume_mwh: float
+    value_inr: float
+    priced_volume_mwh: float = Field(description="Bid volume in blocks with a clearing price")
+    cleared_mwh: float
+    cleared_cost_inr: float
+
+
+class BlotterPage(BaseModel):
+    rows: list[BlotterRow]
+    next_cursor: str | None = Field(description="Pass back as `cursor` for the next page")
+    totals: BlotterTotals
+
+
+class BlotterBlock(BaseModel):
+    block: int
+    price: float
+    volume_mw: float
+    mcp: float | None
+    cleared: bool | None = Field(description="Null until the block's clearing price exists")
+    is_overridden: bool
+    override_reason: str | None
+
+
+class BlotterEvent(BaseModel):
+    timestamp: datetime | None
+    user: str | None
+    action: str
+    details: dict | None
+
+
+class BlotterDetail(BaseModel):
+    session: BlotterRow
+    blocks: list[BlotterBlock]
+    events: list[BlotterEvent]

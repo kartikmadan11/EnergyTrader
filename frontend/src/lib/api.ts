@@ -1,8 +1,23 @@
 import axios from "axios";
+import { SIGNED_OUT } from "@/lib/access";
 
+// Requests go through the web app's proxy, which adds the signed-in user's token.
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || "/api",
+  baseURL: "/api",
   headers: { "Content-Type": "application/json" },
+});
+
+// When the session ends, send the user to sign in and back to the page they were on.
+// A 401 from the API itself means its token was refused, so it surfaces as an error instead
+// of looping through sign-in.
+api.interceptors.response.use(undefined, (error) => {
+  if (error?.response?.status === 401 && error.response.data?.reason === SIGNED_OUT) {
+    // A full page load, so no state from the ended session survives.
+    const login = new URL("/login", window.location.origin);
+    login.searchParams.set("callbackUrl", `${window.location.pathname}${window.location.search}`);
+    window.location.assign(login);
+  }
+  return Promise.reject(error);
 });
 
 /**
@@ -222,15 +237,19 @@ export interface SubmitResult {
   status: "submitted";
 }
 
-/** Submit a bid set. The server re-runs the pre-trade checks and returns 422 if they block it. */
+/**
+ * Submit a bid set under the session id its pre-trade checks ran with. The server re-runs
+ * the checks and returns 422 if they block it, or 409 if the session was already submitted.
+ */
 export async function submitBids(
+  sessionId: string,
   targetDate: string,
   strategy: string,
   segment: string,
   bids: BidItem[],
 ): Promise<SubmitResult> {
   const res = await api.post("/bids/submit", bids, {
-    params: { target_date: targetDate, strategy, segment },
+    params: { session_id: sessionId, target_date: targetDate, strategy, segment },
   });
   return res.data;
 }
@@ -405,17 +424,127 @@ export async function postMarketAnalysis(
   return res.data;
 }
 
-// ---- Health / Fallback ----
-/** API liveness probe. */
-export async function pingApi(): Promise<boolean> {
-  try {
-    const res = await api.get("/health", { timeout: 5000 });
-    return res.data?.status === "ok";
-  } catch {
-    return false;
-  }
+// ---- Blotter ----
+export type BlotterStatus = "pending" | "cleared" | "partial" | "not_cleared";
+export type BlotterSort = "submitted" | "delivery" | "volume" | "value" | "fill";
+
+/** One submitted bid set, with clearing results once prices are published. */
+export interface BlotterRow {
+  session_id: string;
+  /** UTC */
+  submitted_at: string | null;
+  submitted_by: string | null;
+  target_date: string;
+  segment: string;
+  strategy: string;
+  block_count: number;
+  volume_mwh: number;
+  /** Volume-weighted bid price, INR/kWh. */
+  avg_price: number;
+  value_inr: number;
+  overrides: number;
+  verdict: string | null;
+  score: number | null;
+  status: BlotterStatus;
+  /** Blocks with a published clearing price. */
+  priced_blocks: number;
+  cleared_blocks: number;
+  cleared_mwh: number;
+  /** Cleared volume at the clearing price. */
+  cleared_cost_inr: number;
+  /** Cleared share of bid volume, in percent; null while pending. */
+  fill_pct: number | null;
 }
 
+/** Aggregates over every row matching the filters, not just the loaded page. */
+export interface BlotterTotals {
+  sessions: number;
+  volume_mwh: number;
+  value_inr: number;
+  priced_volume_mwh: number;
+  cleared_mwh: number;
+  cleared_cost_inr: number;
+}
+
+export interface BlotterPage {
+  rows: BlotterRow[];
+  next_cursor: string | null;
+  totals: BlotterTotals;
+}
+
+export interface BlotterBlock {
+  block: number;
+  price: number;
+  volume_mw: number;
+  mcp: number | null;
+  /** Null until the block's clearing price exists. */
+  cleared: boolean | null;
+  is_overridden: boolean;
+  override_reason: string | null;
+}
+
+export interface BlotterEvent {
+  timestamp: string | null;
+  user: string | null;
+  action: string;
+  details: Record<string, unknown> | null;
+}
+
+export interface BlotterDetail {
+  session: BlotterRow;
+  blocks: BlotterBlock[];
+  events: BlotterEvent[];
+}
+
+export interface BlotterFilters {
+  segment?: string;
+  strategy?: string;
+  status?: BlotterStatus;
+  delivery_from?: string;
+  delivery_to?: string;
+  trader?: string;
+  /** Session id prefix. */
+  q?: string;
+}
+
+export interface BlotterOrder {
+  sort: BlotterSort;
+  order: "asc" | "desc";
+}
+
+/** Query string for the blotter, leaving out filters that are not set. */
+export function blotterQuery(filters: BlotterFilters, order: BlotterOrder): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries({ ...filters, ...order })) {
+    if (value) params.set(key, value);
+  }
+  return params;
+}
+
+export async function getBlotter(
+  filters: BlotterFilters,
+  order: BlotterOrder,
+  limit: number,
+  cursor?: string,
+): Promise<BlotterPage> {
+  const params = blotterQuery(filters, order);
+  params.set("limit", String(limit));
+  if (cursor) params.set("cursor", cursor);
+  const res = await api.get("/blotter", { params });
+  return res.data;
+}
+
+export async function getBlotterSession(sessionId: string): Promise<BlotterDetail> {
+  const res = await api.get(`/blotter/${encodeURIComponent(sessionId)}`);
+  return res.data;
+}
+
+/** CSV of every matching session, up to the API's export limit, for a plain download link. */
+export function blotterExportUrl(filters: BlotterFilters, order: BlotterOrder): string {
+  return `/api/blotter/export?${blotterQuery(filters, order)}`;
+}
+
+// ---- Health / Fallback ----
 export interface SegmentHealth {
   latest_data: string | null;
   row_count: number;

@@ -1,9 +1,11 @@
 import pytest
+from sqlalchemy.exc import IntegrityError
 
-from common.models import Forecast, PriceHistory
+from common.models import Bid, Forecast, PriceHistory
 
 DATE = "2026-06-01"
 BLOCKS = range(1, 97)
+DRAFT = "6f1c2b8e-4d3a-4f5b-9a7c-2e1d0c9b8a76"
 
 
 def _forecast_rows(segment: str = "DAM") -> list[Forecast]:
@@ -77,6 +79,44 @@ def test_recommend_trade_review_flow(client, seed):
     assert body["mape"] is not None
 
     assert _actions(client)[:2] == ["submit", "pre_trade_check"]
+
+
+def test_a_checked_draft_is_submitted_once_under_its_own_id(client, seed):
+    seed(*_forecast_rows())
+    query = {"target_date": DATE, "segment": "DAM", "session_id": DRAFT}
+    bids = _bid_items()
+    assert client.post("/api/bids/request-approval", params=query, json=bids).status_code == 200
+
+    submitted = client.post("/api/bids/submit", params=query, json=bids)
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["session_id"] == DRAFT
+
+    again = client.post("/api/bids/submit", params=query, json=bids)
+    assert again.status_code == 409
+    assert again.json()["detail"] == "This bid set has already been submitted."
+
+    detail = client.get(f"/api/blotter/{DRAFT}").json()
+    assert [e["action"] for e in detail["events"]] == ["pre_trade_check", "submit"]
+    assert len(detail["blocks"]) == 96
+
+
+@pytest.mark.parametrize("session_id", ["draft-1", DRAFT.upper(), DRAFT[:-1]])
+def test_submit_accepts_only_a_canonical_session_id(client, seed, session_id):
+    seed(*_forecast_rows())
+    response = client.post(
+        "/api/bids/submit",
+        params={"target_date": DATE, "segment": "DAM", "session_id": session_id},
+        json=_bid_items(),
+    )
+    assert response.status_code == 422
+    assert "submit" not in _actions(client)
+
+
+def test_a_session_holds_one_bid_per_block(client, seed):
+    bid = {"session_id": DRAFT, "target_date": DATE, "block": 1, "segment": "DAM"}
+    seed(Bid(**bid, price=5.0, volume_mw=5.0))
+    with pytest.raises(IntegrityError):
+        seed(Bid(**bid, price=6.0, volume_mw=2.0))
 
 
 def test_submit_is_blocked_when_pre_trade_checks_fail(client, seed):
